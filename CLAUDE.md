@@ -65,6 +65,34 @@ mode, never the value that caused it.
 This is the property that makes the service credible. A directory operator who
 cannot log is one who cannot be compelled to produce logs.
 
+### Operator configuration is not request-derived data
+
+The prohibition is on request-derived data, not on all output. Draw the line
+here, because it is easy to draw in the wrong place and both errors are costly —
+one leaks, the other suppresses output an operator legitimately needs.
+
+**May be printed.** Operator configuration echoed at startup: the bind address,
+the database path, the source URL, the configured limits. None of it is a record
+of anybody's request. A panic value and its stack may be printed too — a fault in
+this program is not a fact about a client, and a directory that fails silently is
+one nobody can debug, for no privacy gain.
+
+**May not be printed, ever.** Anything derived from a request, whether or not it
+also appears in configuration: a client address, a lookup prefix, a channel
+identifier, a request URI, a header value, an envelope byte. The origin of the
+value does not matter — what matters is that observing it tells you something
+about who was talking to the directory and what they asked for.
+
+The runtime silence test in `silence_test.go` asserts over *non-banner* output
+for exactly this reason. Its first version swept everything and failed on the
+startup banner, because the banner contains the bind address — which is the
+operator's own configuration and not a client's address, even though the two are
+the same kind of value.
+
+This distinction is also why `internal/api` permits exactly one function,
+`reportPanic`, to write to a process stream, and enforces that by name rather
+than by relaxing the rule.
+
 ---
 
 ## Go constraints

@@ -129,6 +129,13 @@ Rate limits are counted per class and keyed by a truncated address — IPv4 to
 allowances well above honest use rather than tightly. Honest publish volume is
 about one request per server per day.
 
+> **Deploying publicly for the first time?** Work through
+> [docs/deploy-check.md](docs/deploy-check.md) instead of this section alone. It
+> covers certificate issuance and its failure modes, the logging verification
+> below, the trusted-proxy setting, and a first publish-and-lookup against the
+> live instance — which is the only check that exercises real DNS, a real
+> certificate and a real client together.
+
 ### Verifying that your deployment logs nothing
 
 `DIRECTORY-SPEC.md` §9.2 makes this a property of the **deployment**, not of the

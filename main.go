@@ -50,6 +50,7 @@ import (
 	"flag"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"strconv"
@@ -192,6 +193,7 @@ func run(program string, args []string) error {
 	if err != nil {
 		return fmt.Errorf("-trusted-proxies: %w", err)
 	}
+	warnDefaultRoute(trusted)
 
 	recordStore, err := store.Open(cfg.database)
 	if err != nil {
@@ -255,6 +257,35 @@ func run(program string, args []string) error {
 // poller the normal state, not an unusual one. Draining first releases every
 // waiter, each returns the 204 §5.4 requires clients to tolerate, and Shutdown
 // then has only small responses left to flush.
+
+// warnDefaultRoute reports a -trusted-proxies list containing a default route.
+//
+// §6.4: with 0.0.0.0/0 or ::/0 present, every entry in every X-Forwarded-For
+// chain is trusted, so the walk always exhausts and the peer address is always
+// used. The mechanism is inoperative — it behaves exactly as an empty list does.
+//
+// That is safe rather than dangerous, which is why this warns and continues
+// instead of refusing to start. It is a configuration an operator reaches for
+// when a trusted list appears not to work, quite possibly mid-incident, and
+// refusing to start would strand them. Silence would be worse in the other
+// direction: they would believe they had configured something.
+//
+// This prints operator configuration, not request-derived data, so it does not
+// touch the no-logging rule. See CLAUDE.md on where that line falls.
+func warnDefaultRoute(trusted []netip.Prefix) {
+	for _, p := range trusted {
+		if p.Bits() != 0 {
+			continue
+		}
+		fmt.Fprintln(os.Stderr,
+			"trigstationd: warning: -trusted-proxies contains the default route "+
+				p.String()+", which trusts every source. X-Forwarded-For will be "+
+				"ignored and the peer address used for every request, exactly as if "+
+				"no trusted proxies were configured (DIRECTORY-SPEC.md §6.4).")
+		return
+	}
+}
+
 func serve(srv *http.Server, handler *api.Server) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
