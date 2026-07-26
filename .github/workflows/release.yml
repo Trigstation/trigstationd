@@ -1,0 +1,191 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Simon Wright
+
+# Release artefacts.
+#
+# Invariant 6 — any instance is replaceable — rests on "download one file and
+# run it". If the only way to obtain a binary is `go build`, that property is
+# aspirational: it asks every prospective operator to install a Go toolchain
+# before they can evaluate the thing. This workflow is what makes it true.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # create the release and upload assets
+  packages: write # push to ghcr.io
+
+jobs:
+  binaries:
+    name: binaries and checksums
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # go.mod is the single source of truth for the toolchain floor, which
+          # modernc.org/sqlite sets. Do not pin a version here.
+          go-version-file: go.mod
+          check-latest: true
+
+      # The tag is the version. Refuse to release a tree whose tests do not
+      # pass rather than discovering it afterwards from a bug report.
+      - name: verify before releasing
+        env:
+          CGO_ENABLED: 0
+        run: |
+          go vet ./...
+          go test ./... -count=1
+
+      - name: cross-compile
+        env:
+          CGO_ENABLED: 0
+        run: |
+          set -eu
+          version="${GITHUB_REF_NAME}"
+          mkdir -p dist
+          for target in linux/amd64 linux/arm64 darwin/arm64 windows/amd64; do
+            goos="${target%/*}"
+            goarch="${target#*/}"
+            name="trigstationd_${version}_${goos}_${goarch}"
+            out="dist/${name}"
+            if [ "$goos" = "windows" ]; then out="${out}.exe"; fi
+            echo "building ${target}"
+            GOOS="$goos" GOARCH="$goarch" go build \
+              -trimpath \
+              -ldflags "-s -w" \
+              -o "$out" .
+          done
+          ls -l dist
+
+      # One checksums.txt covering every artefact, in the format sha256sum -c
+      # reads, so an operator can verify a download with a tool they already
+      # have rather than one this project asks them to trust.
+      - name: checksums
+        run: |
+          set -eu
+          cd dist
+          sha256sum ./* > checksums.txt
+          cat checksums.txt
+
+      # Release notes come from the CHANGELOG section for this version.
+      # Extracted to a file rather than through process substitution, so a
+      # failure to find the section is visible here instead of producing an
+      # empty release body nobody notices until later.
+      - name: extract release notes
+        run: |
+          set -eu
+          version="${GITHUB_REF_NAME#v}"
+          # Stop at the next section, at the link-reference block, or at an
+          # HTML comment — the last two sit at the tail of the file with no
+          # heading after them, and would otherwise be pasted into the notes.
+          awk -v v="$version" 'index($0, "## [" v "]") == 1 { found = 1; next }
+                               found && index($0, "## [") == 1 { exit }
+                               found && index($0, "<!--") == 1 { exit }
+                               found && index($0, "[") == 1    { exit }
+                               found { print }' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            echo "No CHANGELOG section for ${version}." >&2
+            echo "Add one before tagging: a release with empty notes is one nobody can read." >&2
+            exit 1
+          fi
+          cat notes.md
+
+      - name: create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${GITHUB_REF_NAME}" \
+            --notes-file notes.md \
+            dist/*
+
+  image:
+    name: multi-arch image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/trigstation/trigstationd
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+
+      # linux/amd64 and linux/arm64 only: a directory runs on a small VPS, and
+      # those are the two architectures a VPS is sold with. The darwin and
+      # windows binaries above cover development, not deployment.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: true
+          sbom: true
+
+  smoke:
+    name: the published image actually runs
+    needs: image
+    runs-on: ubuntu-latest
+    steps:
+      # A release that builds but does not run is worse than no release, and
+      # "the workflow exited zero" is not evidence that it runs. This pulls the
+      # image that was just published — not a local build — and asks it a
+      # question.
+      - name: pull and run
+        run: |
+          set -eu
+          image="ghcr.io/trigstation/trigstationd:${GITHUB_REF_NAME#v}"
+          echo "pulling ${image}"
+          docker pull "$image"
+
+          docker run -d --name smoke -p 8080:8080 "$image"
+          waited=0
+          while [ "$waited" -lt 30 ]; do
+            if curl -fsS http://127.0.0.1:8080/v1/meta >/dev/null 2>&1; then break; fi
+            waited=$((waited + 1))
+            sleep 1
+          done
+
+          body=$(curl -fsS http://127.0.0.1:8080/v1/meta)
+          echo "$body"
+
+          # source_url must be present and non-empty: it is how AGPL §13 is
+          # discharged, and a release that ships it empty discharges nothing.
+          echo "$body" | grep -q '"source_url":"http' \
+            || { echo "source_url missing or empty"; exit 1; }
+
+          # Four operations, not five.
+          for p in /health /healthz /metrics /debug/pprof/ /; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:8080${p}")
+            [ "$code" = "404" ] || { echo "${p} answered ${code}, want 404"; exit 1; }
+          done
+
+          # The directory should have said one thing: that it is listening.
+          logs=$(docker logs smoke 2>&1)
+          echo "--- container output ---"
+          echo "$logs"
+          if [ "$(echo "$logs" | grep -c 'listening on')" -ne 1 ]; then
+            echo "unexpected output from the released image"; exit 1
+          fi
+
+          docker rm -f smoke
+          echo "the published image runs"

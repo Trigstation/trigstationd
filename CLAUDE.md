@@ -77,16 +77,35 @@ Three of eighteen amendments were once missed this way and found later by luck.
 
 ---
 
-## Reporting
+## Reporting: two forms, every stop
 
-Stop at each phase boundary, and any time you accumulate spec questions.
+Stop at each phase boundary, and any time you accumulate spec questions. **This
+is a standing instruction, not a per-phase one**, and it applies to every stop
+including small ones.
 
-**To disk** — `docs/reports/<phase>.md`: spec ambiguities with a proposed patch
-for each, spec errors, judgement calls, dependencies added, verification output,
-and what is not done.
+**Form 1 — the full report**, to `docs/reports/<name>.md`: spec ambiguities with
+a proposed patch for each, spec errors, judgement calls, dependencies added,
+verification output actually run, and what is not done.
 
-**To the terminal** — one screen: what was completed, what is blocked and on
-which decision, and the build/test verdict. Simon reads the file for detail.
+**Form 2 — the handback.** Print, **last**, a single fenced markdown block
+headed `## HANDBACK` containing only:
+
+- spec ambiguities, in full
+- spec errors, in full
+- dependencies added
+- a one-line build and test verdict
+- any question needing a ruling, as a numbered list
+
+Target one page. Plain markdown — no ANSI, no box drawing, no tables that need a
+wide terminal. **Write it for a reader who has the spec but has not seen the
+code**, which means naming sections rather than files and describing behaviour
+rather than functions.
+
+If nothing needs a ruling, **say so explicitly** rather than omitting the block.
+An absent handback is indistinguishable from a forgotten one.
+
+The prose before the block is for orientation. The block is the artefact, and it
+should survive being copied out on its own.
 
 Commit as you go, with `git commit -s` per the DCO.
 

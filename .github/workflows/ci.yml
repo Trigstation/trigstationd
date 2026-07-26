@@ -100,10 +100,14 @@ jobs:
         env:
           CGO_ENABLED: 0
         run: |
+          set -eu
           for target in linux/amd64 linux/arm64 darwin/arm64 windows/amd64; do
-            GOOS=${target%/*} GOARCH=${target#*/} go build -o /dev/null ./... \
-              && echo "ok  $target" \
-              || { echo "FAIL $target"; exit 1; }
+            if GOOS="${target%/*}" GOARCH="${target#*/}" go build -o /dev/null ./...; then
+              echo "ok   $target"
+            else
+              echo "FAIL $target"
+              exit 1
+            fi
           done
 
   licence:
@@ -154,6 +158,7 @@ jobs:
         env:
           CGO_ENABLED: 0
         run: |
+          # shellcheck disable=SC2016  # the {{...}} is a Go template, not shell
           found=$(go list -f '{{$p := .ImportPath}}{{range .Imports}}{{$p}} {{.}}
           {{end}}{{range .TestImports}}{{$p}} {{.}}
           {{end}}{{range .XTestImports}}{{$p}} {{.}}

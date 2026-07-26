@@ -30,6 +30,51 @@ Expected load is modest: at 100,000 registered servers, about six publishes and
 twenty lookups a second, roughly 400 MB of storage and 150 GB of egress a month
 (§9.1). That is a small VPS, on the order of NZ$10–25 a month.
 
+## Getting it
+
+Three ways, in increasing order of effort. Building from source is last, and it
+is not the expected path — invariant 6 says any instance is replaceable, and
+that only means something if getting one does not begin with installing a Go
+toolchain.
+
+### A published image
+
+```sh
+docker run -p 8080:8080 -v trigstation:/data ghcr.io/trigstation/trigstationd:latest
+```
+
+Multi-arch, `linux/amd64` and `linux/arm64`. This is plain HTTP with no
+certificate — enough to look at `GET /v1/meta` and decide whether you want to
+run one properly. For that, see the compose stack below.
+
+### A release binary
+
+Every release attaches static binaries for `linux/amd64`, `linux/arm64`,
+`darwin/arm64` and `windows/amd64`, plus a `checksums.txt`. No runtime
+dependencies, no libc requirement, nothing to install:
+
+```sh
+curl -LO https://github.com/Trigstation/trigstationd/releases/latest/download/checksums.txt
+curl -LO https://github.com/Trigstation/trigstationd/releases/latest/download/trigstationd_vX.Y.Z_linux_amd64
+sha256sum -c checksums.txt --ignore-missing
+chmod +x trigstationd_*_linux_amd64
+./trigstationd_*_linux_amd64 -h
+```
+
+Verify the checksum. It costs one command, and the whole argument for running
+your own directory is that you do not have to trust somebody else's.
+
+### From source
+
+```sh
+git clone https://github.com/Trigstation/trigstationd
+cd trigstationd
+CGO_ENABLED=0 go build -o trigstationd .
+```
+
+`CGO_ENABLED=0` matters: it is what makes the result a single static file that
+cross-compiles from one machine to any target. See [Building](#building).
+
 ## Deploying with Docker
 
 Three steps: set a domain, get a certificate, run. The second one happens by
