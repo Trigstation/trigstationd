@@ -113,8 +113,32 @@ func (r RecordReason) HTTPStatus() int {
 }
 
 // SignalReason is the outcome of a signal channel operation
-// (DIRECTORY-SPEC.md §5.4). Unlike RecordReason the order carries no meaning:
-// the conditions are disjoint.
+// (DIRECTORY-SPEC.md §5.4).
+//
+// # The declaration order carries no meaning, and that is a gap rather than a
+// # property
+//
+// An earlier version of this comment claimed the §5.4 conditions were disjoint,
+// so that no order was needed. That was wrong, and it was wrong in the
+// direction that matters: at least three pairs can apply to one request.
+//
+//   - rate limited, and the instance advertises "signal": false
+//   - rate limited, and the body exceeds the payload limit
+//   - a malformed channel_id, and the instance advertises "signal": false
+//
+// §5.2 fixes an evaluation order for exactly this reason and explains why — a
+// publisher's retry logic is driven by the code, so two directories answering
+// differently is an interoperability failure. §5.4 states no order at all.
+//
+// This implementation answers SignalDisabled before SignalRateLimited, and
+// SignalRateLimited before SignalTooLarge. That is a choice this package made,
+// **not** a rule the specification imposes, and another conforming directory may
+// answer differently. It is raised as an open question rather than settled here;
+// the API conformance vectors deliberately contain no fixture asserting a §5.4
+// order, so nothing in the shipped artefacts pretends this is decided.
+//
+// Do not read the constant order below as normative. Unlike RecordReason, it is
+// declaration order and nothing more.
 type SignalReason int
 
 const (

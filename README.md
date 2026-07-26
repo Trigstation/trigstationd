@@ -236,6 +236,14 @@ driver name in `sql.Open` is `sqlite`, not `sqlite3`.
 can verify itself against the spec rather than against this codebase. Regenerate
 with `go run ./cmd/gen-vectors`; CI fails if the committed file drifts.
 
+`testdata/api-vectors.json` is the second half of that deliverable, and covers
+the handler rather than the cryptography: every row of the §5.2 and §5.4 status
+tables, the evaluation order §5.2 mandates, and the verbatim-storage
+requirement. Each fixture is a method, path, query, headers and body against an
+expected status and body, driven against a fixed clock and a declared initial
+state, so an implementation in any language can run them from its own harness.
+Regenerate with `go run ./cmd/gen-api-vectors`. See `testdata/README.md`.
+
 `docker build .` produces a roughly 12 MB image: a distroless static base, the
 binary, and a copy of the licence. There is no shell in it, no package manager
 and no busybox — the only executable is `trigstationd` itself. It runs as uid

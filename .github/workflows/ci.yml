@@ -73,6 +73,16 @@ jobs:
           go run ./cmd/gen-vectors -o /tmp/vectors.json
           diff -u testdata/vectors.json /tmp/vectors.json
 
+      # The same for the API conformance vectors of §9, whose fixtures are what
+      # make the §5.2 and §5.4 status tables verifiable by an implementation in
+      # another language rather than merely readable.
+      - name: api vectors are reproducible
+        env:
+          CGO_ENABLED: 0
+        run: |
+          go run ./cmd/gen-api-vectors -o /tmp/api-vectors.json
+          diff -u testdata/api-vectors.json /tmp/api-vectors.json
+
   static:
     name: static cross-compile
     runs-on: ubuntu-latest
