@@ -150,10 +150,30 @@ func (d *Decoded) SigningBytes() []byte {
 // inner payload signature under IK, which only a client can check
 // (DIRECTORY-SPEC.md §8.1).
 func (d *Decoded) Verify() error {
+	if err := d.VerifyLookupID(); err != nil {
+		return err
+	}
+	return d.VerifySignature()
+}
+
+// VerifyLookupID checks that lookup_id equals SHA-256(wk_pub).
+//
+// It is separate from VerifySignature because DIRECTORY-SPEC.md §5.2 requires
+// the proof of work to be evaluated *between* the two, and the evaluation order
+// is normative. The acceptance pipeline therefore applies them individually;
+// Verify remains for callers that need both and nothing in between.
+func (d *Decoded) VerifyLookupID() error {
 	want := sha256.Sum256(d.WKPub)
 	if subtle.ConstantTimeCompare(want[:], d.LookupID) != 1 {
 		return ErrLookupID
 	}
+	return nil
+}
+
+// VerifySignature checks that sig verifies under wk_pub over the canonical
+// form. It is the most expensive check in the pipeline by roughly two orders of
+// magnitude, which is why §5.2 puts it last of the cryptographic three.
+func (d *Decoded) VerifySignature() error {
 	if !ed25519.Verify(ed25519.PublicKey(d.WKPub), d.SigningBytes(), d.Sig) {
 		return ErrSignature
 	}
