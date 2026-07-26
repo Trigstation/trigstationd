@@ -115,30 +115,30 @@ func (r RecordReason) HTTPStatus() int {
 // SignalReason is the outcome of a signal channel operation
 // (DIRECTORY-SPEC.md §5.4).
 //
-// # The declaration order carries no meaning, and that is a gap rather than a
-// # property
+// # The declaration order is the evaluation order, as it is for RecordReason
 //
 // An earlier version of this comment claimed the §5.4 conditions were disjoint,
-// so that no order was needed. That was wrong, and it was wrong in the
-// direction that matters: at least three pairs can apply to one request.
+// so that no order was needed. That was wrong, and wrong in the direction that
+// matters: at least three pairs can apply to one request — rate limited with
+// "signal": false, rate limited with an over-size body, and a malformed
+// channel_id with "signal": false. §5.4 now fixes an order and this package
+// encodes it, so a caller walking the conditions in constant order gets the
+// right answer without having to remember the rule.
 //
-//   - rate limited, and the instance advertises "signal": false
-//   - rate limited, and the body exceeds the payload limit
-//   - a malformed channel_id, and the instance advertises "signal": false
+// **The ordering principle differs from §5.2's, deliberately.** §5.2 is
+// cheapest-first, so an expensive Ed25519 verification is never reached by a
+// request a SHA-256 would have rejected. §5.4 is by **durability**: when several
+// conditions hold, answer with the one that tells the client the most about what
+// to do next. Static instance configuration, then load shedding, then request
+// validity, then stored state.
 //
-// §5.2 fixes an evaluation order for exactly this reason and explains why — a
-// publisher's retry logic is driven by the code, so two directories answering
-// differently is an interoperability failure. §5.4 states no order at all.
-//
-// This implementation answers SignalDisabled before SignalRateLimited, and
-// SignalRateLimited before SignalTooLarge. That is a choice this package made,
-// **not** a rule the specification imposes, and another conforming directory may
-// answer differently. It is raised as an open question rather than settled here;
-// the API conformance vectors deliberately contain no fixture asserting a §5.4
-// order, so nothing in the shipped artefacts pretends this is decided.
-//
-// Do not read the constant order below as normative. Unlike RecordReason, it is
-// declaration order and nothing more.
+// So SignalDisabled precedes SignalRateLimited. An instance advertising
+// "signal": false will never serve this client, whereas a rate limit lapses
+// within the hour, and PAIRING-SPEC.md §6.3 makes polling the normal path — so
+// answering 429 on a permanently disabled instance would invite an indefinite
+// retry loop against something that can never work. Note that 404 is reachable
+// only on an instance that genuinely advertises "signal": false; it cannot be
+// returned to a client of a working one, under this order or any other.
 type SignalReason int
 
 const (
@@ -160,8 +160,21 @@ const (
 	// case.
 	SignalEmpty
 
-	// SignalBadChannel is a channel_id that is not exactly 32 bytes of unpadded
-	// base64url.
+	// The rejections below are in §5.4's normative evaluation order. Do not
+	// reorder them, and add a new one at the position §5.4 gives the condition
+	// rather than appending it for convenience.
+
+	// SignalDisabled is an instance advertising "signal": false — the only
+	// signal outcome that is 404, and first because it is the most durable
+	// answer available. Nothing this instance is asked will change it.
+	SignalDisabled
+
+	// SignalRateLimited is 429. Second, so that a flooding client is shed
+	// before the directory parses anything on its behalf.
+	SignalRateLimited
+
+	// SignalBadChannel is a channel_id that is not exactly 32 bytes of unpadded,
+	// canonically encoded base64url.
 	SignalBadChannel
 
 	// SignalTooLarge is a body beyond the §4.3 signal channel payload limit.
@@ -172,14 +185,9 @@ const (
 	// who guessed a channel identifier replace a legitimate blob and turn the
 	// rendezvous into an injection point; failing closed reduces that to a
 	// denial of service the participants detect immediately.
+	//
+	// Last, because it is the only condition requiring a look at stored state.
 	SignalConflict
-
-	// SignalRateLimited is 429.
-	SignalRateLimited
-
-	// SignalDisabled is an instance advertising "signal": false. This is the
-	// only signal outcome that is 404.
-	SignalDisabled
 )
 
 // HTTPStatus returns the status code DIRECTORY-SPEC.md §5.4 binds to the reason.

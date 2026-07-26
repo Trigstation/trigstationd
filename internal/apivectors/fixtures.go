@@ -36,8 +36,12 @@ const (
 	condNotNewer        = "not_newer"
 )
 
-// §5.4 condition names. The conditions of that table are disjoint, so their
-// order carries no meaning.
+// §5.4 condition names, declared in the evaluation order §5.4 mandates.
+//
+// An earlier version of this file said the §5.4 conditions were disjoint and so
+// needed no order. They are not: rate limiting co-occurs with "signal": false
+// and with an over-size body, and a malformed channel_id co-occurs with
+// "signal": false.
 const (
 	condStored      = "stored"
 	condDelivered   = "delivered"
@@ -51,6 +55,23 @@ const (
 // recordConditionOrder is the §5.2 table, in order. It is published in the
 // file so that an implementer can compare their own ordering against it
 // without reading this source.
+// queryConditionOrder is the §5.3 table, in order. Only the first entry is
+// observably ordered — every parameter rejection draws 400 — but that one is
+// enough to be got wrong, and a directory that parsed before shedding would do
+// work on behalf of a source it had already decided to refuse.
+var queryConditionOrder = []string{
+	condRateLimited,
+	condMalformed,
+}
+
+var signalConditionOrder = []string{
+	condDisabled,
+	condRateLimited,
+	condBadChannel,
+	condSignalLarge,
+	condConflict,
+}
+
 var recordConditionOrder = []string{
 	condRateLimited,
 	condTooLarge,
@@ -106,6 +127,7 @@ var coverageRows = []struct {
 	{"5.3/prefix-length", "§5.3", "prefix MUST contain exactly ceil(bits / 4) hex characters", 400},
 	{"5.3/repeated-parameter", "§5.3", "A query supplying prefix or bits more than once MUST be rejected rather than resolved", 400},
 	{"5.3/content-type", "§5.3", "GET /v1/record responds with Content-Type: application/json", 200},
+	{"5.3/order", "§5.3", "Rate limiting is evaluated before parameter validity, so a shed source is refused before the directory parses on its behalf", 0},
 	{"5.3/rate-limited", "§5.3", "Rate limited. §6.2 requires a per-source limit on GET as well as PUT, and §6.4 counts it as its own class; §5.3 states no code for it, and 429 is what §5.2 and §5.4 bind rate limiting to", 429},
 
 	{"5.4/post-stored", "§5.4", "POST — Stored", 204},
@@ -119,6 +141,7 @@ var coverageRows = []struct {
 	{"5.4/draining", "§5.4", "either — instance at capacity, or shutting down", 429},
 	{"5.4/disabled", "§5.4", "either — instance advertises \"signal\": false", 404},
 	{"5.4/octet-stream", "§5.4", "A 200 response carries Content-Type: application/octet-stream", 200},
+	{"5.4/order", "§5.4", "The conditions MUST be evaluated in the order of that table. Unlike §5.2's cheapest-first ordering, §5.4 orders by durability: the client is told the answer that says the most about what to do next", 0},
 
 	{"5.5/preflight", "§5.5", "OPTIONS preflight for PUT /v1/record and POST /v1/signal/{channel_id}", 204},
 	{"5.5/allow-origin", "§5.5", "Access-Control-Allow-Origin: * on every /v1/ response. Asserted on every fixture in this file through response_invariants, not only on the ones listed here", 0},
@@ -1805,6 +1828,132 @@ func (g *generator) buildSignalFixtures() {
 		request:    getSignal(g.freeChannel[:len(g.freeChannel)-1]),
 		expect:     expectStatus(400),
 		rows:       []string{"5.4/get-bad-channel"},
+	})
+
+	g.add(fixtureCase{
+		id:       "record-get-order-rate-limited-before-bad-bits",
+		spec:     "§5.3",
+		row:      "order — rate limited (429) precedes a malformed parameter (400)",
+		instance: InstanceLimitsOfOne,
+		note: []string{
+			"Both conditions hold: the allowance is spent AND bits is not a decimal number. §5.3 " +
+				"requires 429.",
+			"This is the only observable ordering in §5.3, because every parameter rejection draws 400 " +
+				"and two of those cannot be told apart on the wire. It is still worth pinning: a " +
+				"directory that validated first would parse and reject on behalf of a source it had " +
+				"already decided to shed.",
+		},
+		conditions: []string{condRateLimited, condMalformed},
+		first:      condRateLimited,
+		ordered:    true,
+		prior: []PriorRequest{{
+			Note:         "Spends this source's single GET /v1/record allowance.",
+			Repeat:       1,
+			ExpectStatus: 200,
+			Request:      getRecord("bits=0"),
+		}},
+		request: getRecord("bits=notanumber"),
+		expect:  expectStatus(429),
+		rows:    []string{"5.3/order"},
+	})
+
+	// §5.4 evaluation-order fixtures. Unlike the two blunt pairs in §5.2 these
+	// all discriminate: each pairs conditions that draw *different* codes, so a
+	// directory evaluating them in the wrong order returns an observably wrong
+	// answer rather than the right one by luck.
+
+	g.add(fixtureCase{
+		id:       "signal-order-disabled-before-rate-limited",
+		spec:     "§5.4",
+		row:      "order — disabled (404) precedes rate limited (429)",
+		instance: InstanceDisabledAndLimited,
+		note: []string{
+			"Both conditions hold: the instance advertises \"signal\": false AND this source has spent " +
+				"its allowance. §5.4 requires 404.",
+			"This is the fixture that shows why §5.4 orders by durability rather than by cost. The " +
+				"instance will never broker a rendezvous for this client, so telling it 404 — stop asking " +
+				"— is more useful than telling it 429, which invites it to retry indefinitely against " +
+				"something that can never work. PAIRING-SPEC.md §6.3 makes polling the normal path, so " +
+				"that retry loop is the common case rather than a corner.",
+			"404 is reachable only on an instance genuinely advertising \"signal\": false. It can never " +
+				"be returned to a client of a working instance, under this order or any other.",
+		},
+		conditions: []string{condDisabled, condRateLimited},
+		first:      condDisabled,
+		ordered:    true,
+		prior: []PriorRequest{{
+			Note:         "Spends this source's single signal allowance. Already 404, because the instance is disabled.",
+			Repeat:       1,
+			ExpectStatus: 404,
+			Request:      getSignal("short"),
+		}},
+		request: getSignal(g.freeChannel),
+		expect:  expectStatus(404),
+		rows:    []string{"5.4/order"},
+	})
+
+	g.add(fixtureCase{
+		id:       "signal-order-disabled-before-bad-channel",
+		spec:     "§5.4",
+		row:      "order — disabled (404) precedes a malformed channel_id (400)",
+		instance: InstanceSignalDisabled,
+		note: []string{
+			"Both conditions hold: the instance is disabled AND the channel_id is too short to be 32 " +
+				"bytes. §5.4 requires 404 — instance configuration is settled before the request is " +
+				"parsed at all.",
+		},
+		conditions: []string{condDisabled, condBadChannel},
+		first:      condDisabled,
+		ordered:    true,
+		request:    getSignal("short"),
+		expect:     expectStatus(404),
+		rows:       []string{"5.4/order"},
+	})
+
+	g.add(fixtureCase{
+		id:       "signal-order-disabled-before-too-large",
+		spec:     "§5.4",
+		row:      "order — disabled (404) precedes an over-size body (413)",
+		instance: InstanceSignalDisabled,
+		note: []string{
+			"Both conditions hold: the instance is disabled AND the body exceeds the §4.3 payload " +
+				"limit. §5.4 requires 404.",
+			"A directory that measured the body first would answer 413 and invite the client to retry " +
+				"with a smaller blob against an instance that will never accept one.",
+		},
+		conditions: []string{condDisabled, condSignalLarge},
+		first:      condDisabled,
+		ordered:    true,
+		request:    postSignal(g.freeChannel, Body{Encoding: BodyRepeatedByte, Byte: 0x61, Length: signal.MaxBlobBytes + 1}),
+		expect:     expectStatus(404),
+		rows:       []string{"5.4/order"},
+	})
+
+	g.add(fixtureCase{
+		id:       "signal-order-rate-limited-before-too-large",
+		spec:     "§5.4",
+		row:      "order — rate limited (429) precedes an over-size body (413)",
+		instance: InstanceLimitsOfOne,
+		note: []string{
+			"Both conditions hold: the allowance is spent AND the body exceeds the payload limit. " +
+				"§5.4 requires 429.",
+			"Rate limiting precedes parsing so that a flooding client is shed before the directory does " +
+				"work on its behalf — the same reasoning §5.2 gives for putting it first there. A " +
+				"directory that measured the body first would still reject, but would have read 64 KiB " +
+				"from a source it had already decided to refuse.",
+		},
+		conditions: []string{condRateLimited, condSignalLarge},
+		first:      condRateLimited,
+		ordered:    true,
+		prior: []PriorRequest{{
+			Note:         "Spends this source's single signal allowance.",
+			Repeat:       1,
+			ExpectStatus: 400,
+			Request:      getSignal("short"),
+		}},
+		request: postSignal(g.freeChannel, Body{Encoding: BodyRepeatedByte, Byte: 0x61, Length: signal.MaxBlobBytes + 1}),
+		expect:  expectStatus(429),
+		rows:    []string{"5.4/order"},
 	})
 
 	g.add(fixtureCase{

@@ -363,10 +363,11 @@ const (
 
 // Instance names. These are part of the file format.
 const (
-	InstanceDefault        = "default"
-	InstanceSignalDisabled = "signal-disabled"
-	InstanceDraining       = "draining"
-	InstanceLimitsOfOne    = "limits-of-one"
+	InstanceDefault            = "default"
+	InstanceSignalDisabled     = "signal-disabled"
+	InstanceDraining           = "draining"
+	InstanceLimitsOfOne        = "limits-of-one"
+	InstanceDisabledAndLimited = "signal-disabled-limits-of-one"
 )
 
 // Marshal renders the vector file exactly as it is committed: two-space

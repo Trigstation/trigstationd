@@ -205,6 +205,25 @@ func instances() []Instance {
 			"channels are gone by the time a fixture runs against this instance.",
 	}
 
+	disabledLimited := base
+	disabledLimited.Name = InstanceDisabledAndLimited
+	disabledLimited.Signal = false
+	disabledLimited.LoadInitialRecords = false
+	disabledLimited.LoadInitialChannels = false
+	disabledLimited.RateLimits = RateLimits{
+		PutRecord:     exhaustibleLimit,
+		GetRecord:     exhaustibleLimit,
+		Signal:        exhaustibleLimit,
+		WindowSeconds: limitWindowSecs,
+	}
+	disabledLimited.Note = []string{
+		"Signal channels off AND an allowance of one, which is the only configuration in which the " +
+			"404 and 429 rows of §5.4 can both apply to one request.",
+		"It exists solely for the evaluation-order fixture. §5.4 requires the durable answer first, so a " +
+			"rate-limited client of a permanently disabled instance is told 404 and stops asking, rather " +
+			"than 429 and retrying indefinitely against something that can never serve it.",
+	}
+
 	limited := base
 	limited.Name = InstanceLimitsOfOne
 	limited.RateLimits = RateLimits{
@@ -224,7 +243,7 @@ func instances() []Instance {
 			"nothing a POST needs.",
 	}
 
-	return []Instance{def, disabled, draining, limited}
+	return []Instance{def, disabled, draining, limited, disabledLimited}
 }
 
 func encodingNotes() Encoding {
@@ -303,18 +322,25 @@ func encodingNotes() Encoding {
 			},
 			{
 				Table:     "§5.3",
-				Normative: false,
-				Note: "§5.3 binds every rejection to 400 and gives no evaluation order, so the choice " +
-					"between two reasons can never be observed on the wire.",
-				Conditions: []string{},
+				Normative: true,
+				Note: "Rate limiting first, then parameter validity, then the instance cap. §5.3 binds " +
+					"every parameter rejection to 400, so the choice between two of those can never be " +
+					"observed on the wire — but rate limiting is 429, so its position relative to them " +
+					"can be, and is fixed here.",
+				Conditions: queryConditionOrder,
 			},
 			{
 				Table:     "§5.4",
-				Normative: false,
-				Note: "The conditions of the §5.4 table are disjoint, so their order carries no meaning. " +
-					"The one exception is not an ordering: an instance that is disabled answers 404 without " +
-					"regard to anything else about the request.",
-				Conditions: []string{},
+				Normative: true,
+				Note: "The conditions MUST be evaluated in this order. They are not disjoint: rate " +
+					"limiting co-occurs with \"signal\": false and with an over-size body, and a malformed " +
+					"channel_id co-occurs with \"signal\": false. The ordering principle differs from " +
+					"§5.2's deliberately — §5.2 is cheapest-first, §5.4 is by durability. When several " +
+					"conditions hold, the client is told the one that says the most about what to do next: " +
+					"an instance advertising \"signal\": false will never serve it, whereas a rate limit " +
+					"lapses within the hour. Static instance configuration, then load shedding, then " +
+					"request validity, then stored state.",
+				Conditions: signalConditionOrder,
 			},
 		},
 	}

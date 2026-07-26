@@ -145,15 +145,24 @@
       },
       {
         "table": "§5.3",
-        "order_is_normative": false,
-        "note": "§5.3 binds every rejection to 400 and gives no evaluation order, so the choice between two reasons can never be observed on the wire.",
-        "conditions_in_order": []
+        "order_is_normative": true,
+        "note": "Rate limiting first, then parameter validity, then the instance cap. §5.3 binds every parameter rejection to 400, so the choice between two of those can never be observed on the wire — but rate limiting is 429, so its position relative to them can be, and is fixed here.",
+        "conditions_in_order": [
+          "rate_limited",
+          "malformed"
+        ]
       },
       {
         "table": "§5.4",
-        "order_is_normative": false,
-        "note": "The conditions of the §5.4 table are disjoint, so their order carries no meaning. The one exception is not an ordering: an instance that is disabled answers 404 without regard to anything else about the request.",
-        "conditions_in_order": []
+        "order_is_normative": true,
+        "note": "The conditions MUST be evaluated in this order. They are not disjoint: rate limiting co-occurs with \"signal\": false and with an over-size body, and a malformed channel_id co-occurs with \"signal\": false. The ordering principle differs from §5.2's deliberately — §5.2 is cheapest-first, §5.4 is by durability. When several conditions hold, the client is told the one that says the most about what to do next: an instance advertising \"signal\": false will never serve it, whereas a rate limit lapses within the hour. Static instance configuration, then load shedding, then request validity, then stored state.",
+        "conditions_in_order": [
+          "signal_disabled",
+          "rate_limited",
+          "bad_channel",
+          "signal_too_large",
+          "conflict"
+        ]
       }
     ]
   },
@@ -257,6 +266,32 @@
       "pow_bits": 8,
       "skew_grace": 300,
       "signal": true,
+      "draining": false,
+      "max_signal_blob_bytes": 65536,
+      "signal_ttl": 300,
+      "signal_poll_window_maximum": 30,
+      "k_min": 20,
+      "source_url": "https://github.com/trigstation/trigstationd",
+      "rate_limits": {
+        "put_record": 1,
+        "get_record": 1,
+        "signal": 1,
+        "window_seconds": 3600
+      },
+      "load_initial_records": false,
+      "load_initial_channels": false
+    },
+    {
+      "name": "signal-disabled-limits-of-one",
+      "note": [
+        "Signal channels off AND an allowance of one, which is the only configuration in which the 404 and 429 rows of §5.4 can both apply to one request.",
+        "It exists solely for the evaluation-order fixture. §5.4 requires the durable answer first, so a rate-limited client of a permanently disabled instance is told 404 and stops asking, rather than 429 and retrying indefinitely against something that can never serve it."
+      ],
+      "max_ttl": 172800,
+      "max_record_bytes": 4096,
+      "pow_bits": 8,
+      "skew_grace": 300,
+      "signal": false,
       "draining": false,
       "max_signal_blob_bytes": 65536,
       "signal_ttl": 300,
@@ -1082,6 +1117,14 @@
     },
     {
       "table": "§5.3",
+      "row": "Rate limiting is evaluated before parameter validity, so a shed source is refused before the directory parses on its behalf",
+      "status": 0,
+      "fixtures": [
+        "record-get-order-rate-limited-before-bad-bits"
+      ]
+    },
+    {
+      "table": "§5.3",
       "row": "Rate limited. §6.2 requires a per-source limit on GET as well as PUT, and §6.4 counts it as its own class; §5.3 states no code for it, and 429 is what §5.2 and §5.4 bind rate limiting to",
       "status": 429,
       "fixtures": [
@@ -1181,6 +1224,17 @@
       "status": 200,
       "fixtures": [
         "signal-get-200-delivered"
+      ]
+    },
+    {
+      "table": "§5.4",
+      "row": "The conditions MUST be evaluated in the order of that table. Unlike §5.2's cheapest-first ordering, §5.4 orders by durability: the client is told the answer that says the most about what to do next",
+      "status": 0,
+      "fixtures": [
+        "signal-order-disabled-before-rate-limited",
+        "signal-order-disabled-before-bad-channel",
+        "signal-order-disabled-before-too-large",
+        "signal-order-rate-limited-before-too-large"
       ]
     },
     {
@@ -3874,6 +3928,245 @@
       },
       "expect": {
         "status": 400,
+        "body": {
+          "encoding": "empty"
+        },
+        "comparison": "empty",
+        "headers": {},
+        "header_tokens": {},
+        "headers_absent": []
+      }
+    },
+    {
+      "id": "record-get-order-rate-limited-before-bad-bits",
+      "spec": "§5.3",
+      "row": "order — rate limited (429) precedes a malformed parameter (400)",
+      "note": [
+        "Both conditions hold: the allowance is spent AND bits is not a decimal number. §5.3 requires 429.",
+        "This is the only observable ordering in §5.3, because every parameter rejection draws 400 and two of those cannot be told apart on the wire. It is still worth pinning: a directory that validated first would parse and reject on behalf of a source it had already decided to shed."
+      ],
+      "instance": "limits-of-one",
+      "violates": [
+        "rate_limited",
+        "malformed"
+      ],
+      "expect_first": "rate_limited",
+      "order_is_normative": true,
+      "discriminating": true,
+      "mutates_state": false,
+      "prior_requests": [
+        {
+          "note": "Spends this source's single GET /v1/record allowance.",
+          "repeat": 1,
+          "expect_status": 200,
+          "request": {
+            "method": "GET",
+            "path": "/v1/record",
+            "query": "bits=0",
+            "headers": {},
+            "body": {
+              "encoding": "empty"
+            }
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "path": "/v1/record",
+        "query": "bits=notanumber",
+        "headers": {},
+        "body": {
+          "encoding": "empty"
+        }
+      },
+      "expect": {
+        "status": 429,
+        "body": {
+          "encoding": "empty"
+        },
+        "comparison": "empty",
+        "headers": {},
+        "header_tokens": {},
+        "headers_absent": []
+      }
+    },
+    {
+      "id": "signal-order-disabled-before-rate-limited",
+      "spec": "§5.4",
+      "row": "order — disabled (404) precedes rate limited (429)",
+      "note": [
+        "Both conditions hold: the instance advertises \"signal\": false AND this source has spent its allowance. §5.4 requires 404.",
+        "This is the fixture that shows why §5.4 orders by durability rather than by cost. The instance will never broker a rendezvous for this client, so telling it 404 — stop asking — is more useful than telling it 429, which invites it to retry indefinitely against something that can never work. PAIRING-SPEC.md §6.3 makes polling the normal path, so that retry loop is the common case rather than a corner.",
+        "404 is reachable only on an instance genuinely advertising \"signal\": false. It can never be returned to a client of a working instance, under this order or any other."
+      ],
+      "instance": "signal-disabled-limits-of-one",
+      "violates": [
+        "signal_disabled",
+        "rate_limited"
+      ],
+      "expect_first": "signal_disabled",
+      "order_is_normative": true,
+      "discriminating": true,
+      "mutates_state": false,
+      "prior_requests": [
+        {
+          "note": "Spends this source's single signal allowance. Already 404, because the instance is disabled.",
+          "repeat": 1,
+          "expect_status": 404,
+          "request": {
+            "method": "GET",
+            "path": "/v1/signal/short",
+            "query": "",
+            "headers": {},
+            "body": {
+              "encoding": "empty"
+            }
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "path": "/v1/signal/oUTVn2-IhI0PrxjSZWa5f-iYBEpxK6ojDgJG7vHS5iM",
+        "query": "",
+        "headers": {},
+        "body": {
+          "encoding": "empty"
+        }
+      },
+      "expect": {
+        "status": 404,
+        "body": {
+          "encoding": "empty"
+        },
+        "comparison": "empty",
+        "headers": {},
+        "header_tokens": {},
+        "headers_absent": []
+      }
+    },
+    {
+      "id": "signal-order-disabled-before-bad-channel",
+      "spec": "§5.4",
+      "row": "order — disabled (404) precedes a malformed channel_id (400)",
+      "note": [
+        "Both conditions hold: the instance is disabled AND the channel_id is too short to be 32 bytes. §5.4 requires 404 — instance configuration is settled before the request is parsed at all."
+      ],
+      "instance": "signal-disabled",
+      "violates": [
+        "signal_disabled",
+        "bad_channel"
+      ],
+      "expect_first": "signal_disabled",
+      "order_is_normative": true,
+      "discriminating": true,
+      "mutates_state": false,
+      "prior_requests": [],
+      "request": {
+        "method": "GET",
+        "path": "/v1/signal/short",
+        "query": "",
+        "headers": {},
+        "body": {
+          "encoding": "empty"
+        }
+      },
+      "expect": {
+        "status": 404,
+        "body": {
+          "encoding": "empty"
+        },
+        "comparison": "empty",
+        "headers": {},
+        "header_tokens": {},
+        "headers_absent": []
+      }
+    },
+    {
+      "id": "signal-order-disabled-before-too-large",
+      "spec": "§5.4",
+      "row": "order — disabled (404) precedes an over-size body (413)",
+      "note": [
+        "Both conditions hold: the instance is disabled AND the body exceeds the §4.3 payload limit. §5.4 requires 404.",
+        "A directory that measured the body first would answer 413 and invite the client to retry with a smaller blob against an instance that will never accept one."
+      ],
+      "instance": "signal-disabled",
+      "violates": [
+        "signal_disabled",
+        "signal_too_large"
+      ],
+      "expect_first": "signal_disabled",
+      "order_is_normative": true,
+      "discriminating": true,
+      "mutates_state": false,
+      "prior_requests": [],
+      "request": {
+        "method": "POST",
+        "path": "/v1/signal/oUTVn2-IhI0PrxjSZWa5f-iYBEpxK6ojDgJG7vHS5iM",
+        "query": "",
+        "headers": {},
+        "body": {
+          "encoding": "repeated_byte",
+          "byte": 97,
+          "length": 65537
+        }
+      },
+      "expect": {
+        "status": 404,
+        "body": {
+          "encoding": "empty"
+        },
+        "comparison": "empty",
+        "headers": {},
+        "header_tokens": {},
+        "headers_absent": []
+      }
+    },
+    {
+      "id": "signal-order-rate-limited-before-too-large",
+      "spec": "§5.4",
+      "row": "order — rate limited (429) precedes an over-size body (413)",
+      "note": [
+        "Both conditions hold: the allowance is spent AND the body exceeds the payload limit. §5.4 requires 429.",
+        "Rate limiting precedes parsing so that a flooding client is shed before the directory does work on its behalf — the same reasoning §5.2 gives for putting it first there. A directory that measured the body first would still reject, but would have read 64 KiB from a source it had already decided to refuse."
+      ],
+      "instance": "limits-of-one",
+      "violates": [
+        "rate_limited",
+        "signal_too_large"
+      ],
+      "expect_first": "rate_limited",
+      "order_is_normative": true,
+      "discriminating": true,
+      "mutates_state": false,
+      "prior_requests": [
+        {
+          "note": "Spends this source's single signal allowance.",
+          "repeat": 1,
+          "expect_status": 400,
+          "request": {
+            "method": "GET",
+            "path": "/v1/signal/short",
+            "query": "",
+            "headers": {},
+            "body": {
+              "encoding": "empty"
+            }
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "path": "/v1/signal/oUTVn2-IhI0PrxjSZWa5f-iYBEpxK6ojDgJG7vHS5iM",
+        "query": "",
+        "headers": {},
+        "body": {
+          "encoding": "repeated_byte",
+          "byte": 97,
+          "length": 65537
+        }
+      },
+      "expect": {
+        "status": 429,
         "body": {
           "encoding": "empty"
         },

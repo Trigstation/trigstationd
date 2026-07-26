@@ -174,3 +174,51 @@ func TestSharedCodesShareARemedy(t *testing.T) {
 		t.Error("an over-long TTL has a different remedy from the recency rule and must not share its code")
 	}
 }
+
+// TestSignalEvaluationOrderIsSpecOrder pins the declaration order of the
+// SignalReason rejections to §5.4's normative order.
+//
+// This exists because the previous version of this package asserted the §5.4
+// conditions were disjoint and therefore needed no order. They are not: rate
+// limiting co-occurs with "signal": false and with an over-size body, and a
+// malformed channel_id co-occurs with "signal": false. A comment claiming
+// otherwise is worse than no comment, because it discourages exactly the check
+// this test performs.
+func TestSignalEvaluationOrderIsSpecOrder(t *testing.T) {
+	want := []SignalReason{
+		SignalDisabled,    // 1. static instance configuration
+		SignalRateLimited, // 2. load shedding
+		SignalBadChannel,  // 3. request validity
+		SignalTooLarge,    // 4. request validity
+		SignalConflict,    // 5. stored state
+	}
+
+	for i := 1; i < len(want); i++ {
+		if !(want[i-1] < want[i]) {
+			t.Errorf("§5.4 requires %d to be evaluated before %d; the declaration order says otherwise",
+				int(want[i-1]), int(want[i]))
+		}
+	}
+}
+
+// TestDurableAnswersPrecedeTransientOnes states the §5.4 ordering principle
+// directly, so that a future reorder has to argue with the reason rather than
+// only with the sequence.
+//
+// §5.2 orders by cost. §5.4 orders by durability: when several conditions hold,
+// the client is told the one that says the most about what to do next. An
+// instance advertising "signal": false will never serve this client; a rate
+// limit lapses within the hour. Answering 429 to a client of a permanently
+// disabled instance invites an indefinite retry loop, and PAIRING-SPEC.md §6.3
+// makes polling the normal path rather than a corner.
+func TestDurableAnswersPrecedeTransientOnes(t *testing.T) {
+	if !(SignalDisabled < SignalRateLimited) {
+		t.Error("a permanently disabled instance must be reported before a transient rate limit")
+	}
+	if !(SignalRateLimited < SignalBadChannel) {
+		t.Error("a flooding client must be shed before the directory parses its channel_id")
+	}
+	if !(SignalConflict > SignalTooLarge) {
+		t.Error("the only condition needing stored state must be evaluated last")
+	}
+}
