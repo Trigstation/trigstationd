@@ -1,0 +1,57 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Simon Wright
+
+# The build context is the Go module and nothing else. Everything listed here is
+# either not needed to produce the binary, or must not end up in an image layer.
+
+# Version control. Excluded because the history is large, is not needed to
+# build, and would otherwise be readable inside any layer that copied it. The
+# Dockerfile passes -buildvcs=false for the same reason.
+.git
+.gitignore
+.gitattributes
+.github
+
+# Documentation and process notes. Not inputs to a build.
+docs
+CLAUDE.md
+README.md
+
+# Test material. testdata/vectors.json is a shipped deliverable for other
+# implementations to verify against (§9), not something the binary reads: it is
+# embedded nowhere and opened only by tests.
+testdata
+**/*_test.go
+
+# Deployment artefacts. The image does not build itself, and .env holds the
+# operator's domain.
+Dockerfile
+.dockerignore
+docker-compose.yml
+Caddyfile
+.env
+.env.example
+
+# Local runtime state. A directory's database holds only ciphertext, but it has
+# no business in a build context regardless — and copying one in would seed the
+# image with somebody's records.
+*.db
+*.db-wal
+*.db-shm
+data
+dist
+
+# Local build and test output.
+trigstationd
+trigstationd.exe
+*.test
+*.test.exe
+*.out
+coverage.txt
+
+# Editor and OS noise.
+.vscode
+.idea
+*.swp
+.DS_Store
+Thumbs.db

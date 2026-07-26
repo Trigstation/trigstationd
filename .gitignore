@@ -16,6 +16,10 @@ coverage.txt
 *.db-shm
 /data/
 
+# The operator's deployment settings: their domain, and the source_url of their
+# fork. .env.example is the committed template.
+/.env
+
 # Editor and OS noise
 .vscode/
 .idea/

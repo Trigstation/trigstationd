@@ -1,0 +1,172 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Simon Wright
+
+# A complete Trigstation directory: Caddy holding the certificate, trigstationd
+# behind it, and nothing else.
+#
+#   cp .env.example .env     # then put your domain in it
+#   docker compose up -d
+#
+# That is the deployment story of DIRECTORY-SPEC.md §9 — set a domain, get a
+# certificate, run. Point the domain's A/AAAA records at this host first, or
+# Caddy's ACME challenge will fail.
+
+services:
+  trigstationd:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: trigstationd:local
+    restart: unless-stopped
+
+    # No `ports:`. The directory is not published to the host at all — it is
+    # reachable only from Caddy, over the internal network below. Adding a port
+    # mapping here would expose plain HTTP to the internet and let clients
+    # bypass TLS entirely.
+
+    networks:
+      - directory
+
+    environment:
+      # ------------------------------------------------------------------
+      # -trusted-proxies. Do not delete this. It is the difference between a
+      # working directory and an outage.
+      # ------------------------------------------------------------------
+      #
+      # trigstationd rate limits per source address (§6.2). Behind a proxy it
+      # sees CADDY'S address on every single request, so without this setting
+      # every client in the world shares one rate-limiter key, the hourly
+      # allowance is spent in seconds, and the directory then refuses
+      # everybody. §6.4 is explicit that this is not a weakened defence but an
+      # outage — and it is the DEFAULT if this line goes missing, because
+      # trigstationd trusts no forwarded header unless told to.
+      #
+      # It is not simply "trust the header", either. §6.4 requires that a
+      # forwarded address is believed only when the immediate peer is on this
+      # list, otherwise any client could pick its own limiter key by sending
+      # its own X-Forwarded-For. So the value is the network Caddy talks to
+      # the directory on, and nothing wider.
+      #
+      # THIS VALUE AND THE directory NETWORK'S SUBNET AT THE BOTTOM OF THIS
+      # FILE ARE ONE SETTING WRITTEN TWICE. Change one and you must change the
+      # other. The subnet is pinned rather than left to Docker to allocate for
+      # exactly this reason: an allocated subnet differs between machines, and
+      # a trusted-proxy list that does not match the network it names is
+      # indistinguishable in behaviour from not setting it at all.
+      TRIGSTATIOND_TRUSTED_PROXIES: "172.28.0.0/24"
+
+      # ------------------------------------------------------------------
+      # source_url — an AGPL §13 obligation expressed as configuration.
+      # ------------------------------------------------------------------
+      #
+      # Published verbatim by GET /v1/meta. If you are running a MODIFIED
+      # trigstationd and offering it over a network, §13 requires you to give
+      # your users a way to get your modified source, and this field is how
+      # that is discharged. Set TRIGSTATION_SOURCE_URL in .env to point at
+      # YOUR source.
+      #
+      # Running the unmodified reference implementation carries no such
+      # obligation, and the default below is then correct as it stands.
+      #
+      # It may not be empty: trigstationd refuses to start if it is, so that
+      # compliance is the default rather than something to discover.
+      TRIGSTATIOND_SOURCE_URL: "${TRIGSTATION_SOURCE_URL:-https://github.com/trigstation/trigstationd}"
+
+      # Everything else runs at its documented default. Run
+      # `docker compose run --rm trigstationd -h` for the full list; the ones
+      # an operator is most likely to want are TRIGSTATIOND_POW_BITS (raise
+      # under load, §6.1) and the three TRIGSTATIOND_RATE_* allowances, which
+      # §6.4 says to set well above honest use rather than tightly.
+
+    volumes:
+      # Records live here. §9's schema is one table and the file is small — a
+      # few hundred megabytes at a hundred thousand registered servers (§9.1) —
+      # but it must outlive the container, or every server that has published
+      # to this directory disappears from it on the next `docker compose up`.
+      - records:/data
+
+    # Hardening. None of this is required by the spec; all of it is cheap.
+    # The root filesystem is read-only because the only thing the process
+    # writes is the database on the volume above, and /tmp is a tmpfs because
+    # SQLite may want somewhere to spill a large sort.
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+
+    # 80 is needed for the ACME challenge and for the redirect to HTTPS; 443
+    # serves the directory. The UDP mapping is HTTP/3, which Caddy enables
+    # alongside HTTP/2 — harmless to omit if the host forbids UDP.
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+
+    environment:
+      # The one thing an operator must set. Compose fails loudly here rather
+      # than letting Caddy start with an empty site address.
+      TRIGSTATION_DOMAIN: "${TRIGSTATION_DOMAIN:?set TRIGSTATION_DOMAIN in .env, e.g. directory.example.com}"
+
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates and ACME account keys. Losing this volume means
+      # re-issuing on every restart, which will hit the certificate
+      # authority's rate limits and leave the directory without TLS.
+      - caddy_data:/data
+      - caddy_config:/config
+
+    networks:
+      - edge
+      - directory
+
+    depends_on:
+      - trigstationd
+
+    # There is no /health endpoint and there must not be one: the API stays at
+    # four operations (§10). GET /v1/meta is the substitute the spec already
+    # provides — unauthenticated, always present, one COUNT and under two
+    # hundred bytes, and not rate limited, so polling it costs nothing.
+    #
+    # The check lives on this service rather than on trigstationd because
+    # Docker healthchecks are executed inside the container being checked, and
+    # the trigstationd image has no shell and no wget by design. Run from here
+    # it proves rather more anyway: that the directory is up, that the internal
+    # network resolves, and that the path Caddy actually uses works.
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "--timeout=5", "http://trigstationd:8080/v1/meta"]
+      interval: 30s
+      timeout: 10s
+      start_period: 10s
+      retries: 3
+
+networks:
+  # Caddy's route to the internet: inbound requests, and outbound ACME.
+  edge:
+    driver: bridge
+
+  # Caddy to trigstationd, and nothing else. `internal` means no gateway is
+  # attached, so the directory has no route off this host — it accepts requests
+  # from the proxy and cannot make an outbound connection of its own.
+  directory:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        # PINNED, AND PAIRED WITH TRIGSTATIOND_TRUSTED_PROXIES ABOVE. See the
+        # long comment there before changing it. If this subnet collides with
+        # something else on the host, Docker will refuse to create the network
+        # with a clear error; change it here and in TRIGSTATIOND_TRUSTED_PROXIES
+        # together, to the same value.
+        - subnet: 172.28.0.0/24
+
+volumes:
+  records:
+  caddy_data:
+  caddy_config:

@@ -1,0 +1,98 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Simon Wright
+
+# Caddy configuration for a Trigstation directory.
+#
+# Caddy is here for one reason: to hold a certificate. It obtains and renews one
+# automatically for $TRIGSTATION_DOMAIN, terminates TLS, and passes the request
+# to trigstationd over the internal network. Nothing else belongs in this file.
+{
+	# The admin API is an unauthenticated control channel on 2019 that can
+	# replace the running configuration. Nothing here uses it, so it is off.
+	admin off
+
+	# ------------------------------------------------------------------
+	# NO REQUEST LOGGING. Do not delete this block.
+	# ------------------------------------------------------------------
+	#
+	# DIRECTORY-SPEC.md §9 and §6.4 require that client addresses and request
+	# paths are never written anywhere. trigstationd holds up that end: the
+	# code to log them does not exist in it. That is worth nothing if the
+	# proxy in front logs them instead, and this is exactly the sort of thing
+	# that gets missed, because the logging is in a different component.
+	#
+	# Caddy's per-request behaviour, verified against Caddy v2.11.4 rather
+	# than assumed, is in two halves:
+	#
+	#   - The ACCESS log is off unless a site block asks for it. The site
+	#     block below asks for it and sends it to `discard`, so it is off by
+	#     statement as well as by default.
+	#
+	#   - The ERROR log is ON BY DEFAULT and is the one that catches people.
+	#     Any per-request failure — most commonly a 502 while trigstationd is
+	#     restarting — writes an entry under `http.log.error` carrying
+	#     remote_ip, client_ip, the full URI and the request headers. A rolling
+	#     restart is therefore enough to dump every client address of the
+	#     moment to stdout, and from there to the host's journal. `exclude`
+	#     below is what stops it, and it is the only thing that stops it:
+	#     `output discard` in the site block does not, because the error
+	#     logger is not the access logger.
+	#
+	# What survives is startup, certificate and shutdown events, which name
+	# the operator's own domain and nothing of anyone else's.
+	log default {
+		output stderr
+		exclude http.log.access http.log.error
+	}
+}
+
+# The domain comes from the environment so that this file needs no editing. Set
+# TRIGSTATION_DOMAIN in .env; docker-compose.yml passes it through.
+#
+# Naming a domain here is the whole of "get a certificate": Caddy solves an ACME
+# challenge on ports 80 and 443 at first start, serves HTTPS, redirects HTTP to
+# it, and renews without being asked.
+{$TRIGSTATION_DOMAIN} {
+	# The access log, explicitly off. See the comment above — this covers the
+	# access log only, and the global `exclude` covers the error log.
+	log {
+		output discard
+	}
+
+	reverse_proxy trigstationd:8080 {
+		# --------------------------------------------------------------
+		# X-Forwarded-For is deliberately NOT configured here.
+		# --------------------------------------------------------------
+		#
+		# Caddy's default is already what §6.4 needs, and overriding it
+		# could only make things worse. Verified against v2.11.4:
+		#
+		#   - A request arriving with no X-Forwarded-For reaches
+		#     trigstationd with exactly one entry: the address Caddy
+		#     observed.
+		#   - A request arriving WITH a client-supplied X-Forwarded-For
+		#     has it DISCARDED and replaced by the observed address, so
+		#     the entry is still exactly one and it is still the real
+		#     one. That is because Caddy's own `trusted_proxies` global
+		#     option defaults to trusting nothing, and the header is only
+		#     preserved-and-appended-to for peers on that list.
+		#
+		# Either way the value trigstationd reads is a single true client
+		# address, which agrees with internal/clientaddr taking the
+		# RIGHTMOST entry (§6.4) — and would still agree if Caddy were
+		# configured to append instead, since the appended entry is the
+		# rightmost.
+		#
+		# If you ever put another proxy in front of Caddy — a CDN, a load
+		# balancer — set Caddy's global `trusted_proxies` to THAT proxy's
+		# addresses. Without it Caddy will discard the header that proxy
+		# set and report the proxy's own address as the client, and every
+		# client in the world collapses into one rate-limiter key again.
+		#
+		# Do not set `trusted_proxies` to the directory network. Caddy's
+		# trusted_proxies is about who may speak to Caddy about a client;
+		# trigstationd's -trusted-proxies, in docker-compose.yml, is about
+		# who may speak to trigstationd about one. They are different
+		# settings with confusingly similar names.
+	}
+}
