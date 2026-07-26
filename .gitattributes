@@ -1,0 +1,10 @@
+# Normalise every text file to LF in the repository and in the working copy.
+#
+# Without this, a clone on Windows with core.autocrlf=true checks out CRLF, and
+# testdata/vectors.json stops matching the bytes the generator produces — the
+# vectors self-check compares file bytes, so it would fail on a fresh clone for
+# a reason that has nothing to do with the code.
+* text=auto eol=lf
+
+# Licence texts are shipped verbatim; never touch them.
+LICENSE -text
