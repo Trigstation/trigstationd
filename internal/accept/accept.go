@@ -57,6 +57,7 @@
 package accept
 
 import (
+	"bytes"
 	"encoding/json"
 
 	"github.com/trigstation/trigstationd/internal/pow"
@@ -230,6 +231,22 @@ func parse(body []byte) (*record.Envelope, bool) {
 	if err := json.Unmarshal(body, &members); err != nil {
 		return nil, false
 	}
+
+	// §5.2: an envelope containing the same member name more than once is
+	// malformed. A map cannot show this — unmarshalling collapses duplicates,
+	// keeping whichever occurrence the decoder saw last — so the raw token
+	// stream has to be walked separately.
+	//
+	// This is not pedantry about a malformed body. Parsers disagree about which
+	// occurrence wins, and because the directory verifies a signature over the
+	// fields it parsed and then stores the bytes verbatim (§5.2), a first-wins
+	// directory and a last-wins client can end up disagreeing about an
+	// expires_at that the directory never validated. It is a signature bypass
+	// wearing a parser disagreement as a costume.
+	if hasDuplicateMembers(body) {
+		return nil, false
+	}
+
 	for _, name := range requiredMembers {
 		raw, present := members[name]
 		if !present || string(raw) == "null" {
@@ -245,4 +262,53 @@ func parse(body []byte) (*record.Envelope, bool) {
 	}
 
 	return &env, true
+}
+
+// hasDuplicateMembers reports whether the top-level JSON object names any
+// member more than once.
+//
+// Only the top level is examined. Every member of an envelope is a scalar
+// (§4.1), so there is no nested object in a well-formed one, and a body that
+// nests something where a scalar belongs fails the decode into record.Envelope
+// regardless. Walking arbitrary depth would mean recursing over
+// attacker-supplied structure for no gain.
+//
+// A body that is not an object, or is malformed, reports false: those are
+// rejected by the surrounding decode, and this function's job is only to answer
+// the duplicate question.
+func hasDuplicateMembers(body []byte) bool {
+	dec := json.NewDecoder(bytes.NewReader(body))
+
+	tok, err := dec.Token()
+	if err != nil {
+		return false
+	}
+	if delim, ok := tok.(json.Delim); !ok || delim != '{' {
+		return false
+	}
+
+	seen := make(map[string]struct{})
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return false
+		}
+		name, ok := tok.(string)
+		if !ok {
+			return false
+		}
+		if _, dup := seen[name]; dup {
+			return true
+		}
+		seen[name] = struct{}{}
+
+		// Skip the value. Decoding into json.RawMessage consumes exactly one
+		// value whatever its shape, which advances the stream without this
+		// having to track nesting itself.
+		var skip json.RawMessage
+		if err := dec.Decode(&skip); err != nil {
+			return false
+		}
+	}
+	return false
 }

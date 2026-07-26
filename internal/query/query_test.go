@@ -669,7 +669,7 @@ func TestFullPrefixIsMasked(t *testing.T) {
 // TestEveryReasonIsMapped mirrors internal/reject: a reason added without a case
 // in HTTPStatus would otherwise reach a client as a 500.
 func TestEveryReasonIsMapped(t *testing.T) {
-	for r := ReasonBitsMissing; r <= ReasonPrefixNotHex; r++ {
+	for r := ReasonBitsMissing; r <= ReasonRepeatedParameter; r++ {
 		if got := r.HTTPStatus(); got != 400 {
 			t.Errorf("Reason(%d).HTTPStatus() = %d, want 400 — every §5.3 rejection is 400", int(r), got)
 		}
@@ -737,4 +737,37 @@ func itoa64(n int64) string {
 		return "-" + itoa64(-n)
 	}
 	return itoa(uint(n))
+}
+
+// TestBitsRejectsLeadingZeros covers §5.3's lexical rule: "one or more ASCII
+// digits: no sign, no leading zeros, no whitespace".
+//
+// strconv.ParseUint accepts every one of these and reads "00" as 0 and "010"
+// as 10, so the check has to be explicit. Two spellings of one bit count is the
+// same defect the canonical-encoding rule closes for base64url — and it reached
+// the wire, where ?prefix=&bits=00 was answered 200 rather than 400.
+func TestBitsRejectsLeadingZeros(t *testing.T) {
+	for _, s := range []string{"00", "000", "010", "0000000001"} {
+		t.Run(s, func(t *testing.T) {
+			if _, err := Parse("", true, s, true, 12); err == nil {
+				t.Errorf("Parse accepted bits=%q; §5.3 forbids a leading zero", s)
+			}
+		})
+	}
+
+	// A single zero is the ordinary bits=0 query and must still be accepted.
+	if _, err := Parse("", true, "0", true, 12); err != nil {
+		t.Errorf("Parse rejected bits=0: %v", err)
+	}
+}
+
+// TestBitsRejectsOtherNotations pins the rest of the lexical rule.
+func TestBitsRejectsOtherNotations(t *testing.T) {
+	for _, s := range []string{"+12", "-1", " 4", "4 ", "0x4", "4.0", "1e2", "", "four", "1_0"} {
+		t.Run(s, func(t *testing.T) {
+			if _, err := Parse("abc", true, s, true, 12); err == nil {
+				t.Errorf("Parse accepted bits=%q", s)
+			}
+		})
+	}
 }

@@ -1034,3 +1034,88 @@ func packageSources(t *testing.T, includeTests bool) []string {
 	}
 	return out
 }
+
+// TestDuplicateMembersAreRejected covers §5.2's rule that an envelope naming
+// the same member twice is malformed.
+//
+// This is not pedantry about a malformed body. Parsers disagree about which
+// occurrence wins, and because the directory verifies a signature over the
+// fields it parsed and then stores the bytes verbatim, a first-wins directory
+// and a last-wins client can disagree about an expires_at that the directory
+// never validated — a signature bypass wearing a parser disagreement as a
+// costume.
+//
+// The regression this guards is specific: duplicating "v" verbatim was answered
+// 204. A duplicated expires_at happened to draw a 400, but only because Go's
+// last-wins decode tripped the TTL bound rather than because the duplicate was
+// detected — so a test using expires_at alone would have passed with the bug
+// present. Every member is covered, and each duplicate repeats the original
+// value verbatim so that no downstream check can reject it for another reason.
+func TestDuplicateMembersAreRejected(t *testing.T) {
+	f := valid(t)
+	body := f.body(t)
+
+	// The unmodified fixture must be accepted, or the subtests below prove
+	// nothing.
+	if got, _ := Check(body, testNow, testLimits(), false); got != reject.RecordAccepted {
+		t.Fatalf("the unmodified fixture was rejected with %v; this test would be vacuous", got)
+	}
+
+	for _, member := range requiredMembers {
+		t.Run(member, func(t *testing.T) {
+			dup := duplicateMember(t, body, member)
+			got, _ := Check(dup, testNow, testLimits(), false)
+			if got != reject.RecordMalformed {
+				t.Errorf("duplicate %q = %v (HTTP %d), want RecordMalformed (400)",
+					member, got, got.HTTPStatus())
+			}
+		})
+	}
+
+	// An unknown member duplicated is still a duplicate. §10 requires unknown
+	// members to be ignored, not to be exempt from the well-formedness rule.
+	t.Run("unknown member", func(t *testing.T) {
+		withUnknown := f.bodyWith(t, map[string]any{"future": "abc"})
+		dup := duplicateMember(t, withUnknown, "future")
+		if got, _ := Check(dup, testNow, testLimits(), false); got != reject.RecordMalformed {
+			t.Errorf("duplicate unknown member = %v, want RecordMalformed", got)
+		}
+	})
+}
+
+// duplicateMember returns body with member's name and value repeated verbatim
+// as a second entry of the same object.
+//
+// The splice is deliberate: encoding/json cannot emit a duplicate key, which is
+// precisely the difficulty being tested, so the bytes have to be assembled by
+// hand.
+func duplicateMember(t *testing.T, body []byte, member string) []byte {
+	t.Helper()
+
+	var members map[string]json.RawMessage
+	if err := json.Unmarshal(body, &members); err != nil {
+		t.Fatalf("fixture is not a JSON object: %v", err)
+	}
+	raw, ok := members[member]
+	if !ok {
+		t.Fatalf("fixture has no member %q", member)
+	}
+
+	i := bytes.IndexByte(body, '{')
+	if i < 0 {
+		t.Fatal("fixture has no opening brace")
+	}
+	out := append([]byte{}, body[:i+1]...)
+	out = append(out, []byte(`"`+member+`":`+string(raw)+`,`)...)
+	out = append(out, body[i+1:]...)
+
+	// Assert the helper's own premise. A splice that silently failed would make
+	// every subtest above pass for the wrong reason.
+	if n := bytes.Count(out, []byte(`"`+member+`":`)); n < 2 {
+		t.Fatalf("splice produced %d occurrences of %q, want 2", n, member)
+	}
+	if !json.Valid(out) {
+		t.Fatalf("splice produced invalid JSON for member %q", member)
+	}
+	return out
+}

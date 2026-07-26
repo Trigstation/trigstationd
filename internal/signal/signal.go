@@ -330,7 +330,11 @@ func (s *Store) Get(ctx context.Context, id string, now time.Time) ([]byte, reje
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
-		return nil, reject.SignalEmpty
+		// 429, not 204, for the same reason Post gives: §5.4's table binds "at
+		// capacity, or shutting down" to 429 for either method. 204 would tell
+		// the client to poll again immediately, hot-looping against an instance
+		// that has just declined it and is on its way down.
+		return nil, reject.SignalRateLimited
 	}
 
 	ch := s.channels[key]
@@ -374,14 +378,27 @@ func (s *Store) Get(ctx context.Context, id string, now time.Time) ([]byte, reje
 		return <-w.c, reject.SignalDelivered
 	}
 	s.releaseLocked(key, ch, w)
+	// Read the flag under the lock rather than recording which select arm
+	// fired. A poll whose deadline expires at the same moment shutdown begins
+	// picks an arm at random, and the client should be told the instance is
+	// going away either way.
+	drained := s.closed
 	s.mu.Unlock()
+	if drained {
+		return nil, reject.SignalRateLimited
+	}
 	return nil, reject.SignalEmpty
 }
 
 // Shutdown releases every waiter and drops every stored blob. In-flight
-// long-polls return promptly with reject.SignalEmpty rather than running to
-// their deadline, so a graceful shutdown never waits 30 seconds on an idle
+// long-polls return promptly with reject.SignalRateLimited rather than running
+// to their deadline, so a graceful shutdown never waits 30 seconds on an idle
 // poll.
+//
+// Released polls report 429 rather than 204 because a draining instance cannot
+// serve a later poll either, and §5.4 reserves 204 for "nothing yet, ask
+// again". Telling a client to come straight back to an instance that is going
+// away is the hot-loop that section's reasoning rules out.
 //
 // It is idempotent, and it does not wait for the released callers to finish
 // returning; there is nothing for them to finish that the store owns.
@@ -403,6 +420,21 @@ func (s *Store) Shutdown() {
 		delete(s.channels, key)
 	}
 	s.waiting = 0
+}
+
+// Waiting returns how many long-polls are currently open across the whole
+// store.
+//
+// It is an aggregate count and discloses nothing about any channel: not which
+// ones are being polled, not how many polls a channel has, not whether a
+// channel exists. That is the same line internal/ratelimit draws with
+// TrackedKeys, and for the same reason — an operator sizing MaxWaiters needs a
+// figure to size against, and a test in another package needs to know a waiter
+// has registered without reaching into this one.
+func (s *Store) Waiting() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.waiting
 }
 
 // registerLocked adds a waiter for key, or returns the reason it will not.

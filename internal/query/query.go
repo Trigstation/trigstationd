@@ -148,10 +148,19 @@ func Parse(prefixParam string, prefixPresent bool, bitsParam string, bitsPresent
 		return Query{}, ReasonBitsMissing
 	}
 
-	// ParseUint rather than ParseInt: a sign prefix is not permitted, so "-1"
-	// fails here as a malformed value rather than wrapping to something
-	// enormous. A value too large for 32 bits fails as out of range, so nothing
-	// downstream has to defend against one.
+	// §5.3 fixes the lexical form: one or more ASCII digits, no sign, no
+	// leading zeros, no whitespace, no other notation.
+	//
+	// ParseUint covers most of that on its own — it rejects a sign, so "-1"
+	// fails here rather than wrapping to something enormous, and a value too
+	// large for 32 bits fails as out of range, so nothing downstream has to
+	// defend against one. What it does not reject is a leading zero: it reads
+	// "00" as 0 and "010" as 10. Two spellings of one value is the same defect
+	// the canonical-encoding rule closes for base64url, so it is rejected here
+	// rather than normalised.
+	if bitsParam == "" || (len(bitsParam) > 1 && bitsParam[0] == '0') {
+		return Query{}, ReasonBitsMalformed
+	}
 	n, err := strconv.ParseUint(bitsParam, 10, 32)
 	if err != nil {
 		return Query{}, ReasonBitsMalformed

@@ -60,6 +60,19 @@ const (
 	// ReasonPrefixNotHex is a character outside [0-9a-fA-F]. Case is not a
 	// fault: §5.3 requires both a3f and A3F to be accepted.
 	ReasonPrefixNotHex
+
+	// ReasonRepeatedParameter is a query supplying prefix or bits more than
+	// once. §5.3 requires it to be rejected rather than resolved: HTTP stacks
+	// disagree about which occurrence wins, so resolving it means two
+	// directories reading the same query differently, and no honest client
+	// emits one.
+	//
+	// Unlike every other reason here this one is not produced by Parse, which
+	// takes one string per parameter and so cannot see a repetition. It is
+	// produced by the transport, which is the only layer that can. It lives
+	// here anyway, because the alternative is a handler writing 400 out by hand
+	// and a second copy of the §5.3 table living outside this package.
+	ReasonRepeatedParameter
 )
 
 // Error implements error.
@@ -77,6 +90,8 @@ func (r Reason) Error() string {
 		return "query: prefix length does not match bits"
 	case ReasonPrefixNotHex:
 		return "query: prefix contains a character outside the hex alphabet"
+	case ReasonRepeatedParameter:
+		return "query: a query parameter is supplied more than once"
 	}
 	return "query: rejected"
 }
@@ -92,7 +107,8 @@ func (r Reason) HTTPStatus() int {
 		ReasonBitsTooPrecise,
 		ReasonPrefixMissing,
 		ReasonPrefixLength,
-		ReasonPrefixNotHex:
+		ReasonPrefixNotHex,
+		ReasonRepeatedParameter:
 		return http.StatusBadRequest // 400
 	}
 	// Unreachable for any declared reason. See the note in internal/reject.

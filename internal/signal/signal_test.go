@@ -524,8 +524,12 @@ func TestShutdownReleasesAnOpenLongPoll(t *testing.T) {
 	}
 	select {
 	case reason := <-done:
-		if reason != reject.SignalEmpty {
-			t.Errorf("released long poll = %s, want SignalEmpty", reasonString(reason))
+		// 429, not 204: §5.4 binds "at capacity, or shutting down" to 429 for
+		// either method, and a draining instance cannot serve a later poll
+		// either. 204 would send the client straight back to an instance on
+		// its way down.
+		if reason != reject.SignalRateLimited {
+			t.Errorf("released long poll = %s, want SignalRateLimited", reasonString(reason))
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("long poll hung past Shutdown")
@@ -533,8 +537,8 @@ func TestShutdownReleasesAnOpenLongPoll(t *testing.T) {
 
 	// Idempotent, and closed to further work.
 	s.Shutdown()
-	if _, reason := s.Get(context.Background(), chanID(12), time.Now()); reason != reject.SignalEmpty {
-		t.Errorf("Get after Shutdown = %s, want SignalEmpty", reasonString(reason))
+	if _, reason := s.Get(context.Background(), chanID(12), time.Now()); reason != reject.SignalRateLimited {
+		t.Errorf("Get after Shutdown = %s, want SignalRateLimited", reasonString(reason))
 	}
 	if got := s.Post(chanID(12), []byte("late"), time.Now()); got != reject.SignalRateLimited {
 		t.Errorf("Post after Shutdown = %s, want SignalRateLimited", reasonString(got))
