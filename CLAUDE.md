@@ -2,247 +2,131 @@
 
 Reference implementation of the Trigstation directory service.
 
-A zero-knowledge coordination service that lets a self-hosted media server be
-located by its paired clients over the internet. It stores encrypted address
-records and brokers short-lived rendezvous channels. It never carries media,
-never holds accounts, and cannot read what it stores.
+## Read CONTRIBUTING.md first
+
+**[CONTRIBUTING.md](CONTRIBUTING.md) is the normative statement of what this
+project requires.** The design invariants, the no-logging rule and where its
+boundary falls, `CGO_ENABLED=0`, four operations and not five, the dependency
+budget, the testing conventions, the licence headers and the house style all
+live there and are not repeated here.
+
+They are project constraints, not agent constraints. A human contributor is
+bound by them exactly as much, and they used to live in this file — which was
+the wrong home, because a human reading a file addressed to an AI could
+reasonably assume it was somebody else's problem.
+
+What follows is only the part that is specific to working here as an agent.
 
 ---
 
-## The spec is authoritative
+## The spec is authoritative, and you do not have spec authority
 
-`DIRECTORY-SPEC.md` in the `/spec` repo defines the wire format and
-API. This repo implements it. Where code and spec disagree, the spec is right and
-the code is a bug.
+`DIRECTORY-SPEC.md` and `PAIRING-SPEC.md` live in the `spec` repository. They
+define the wire format; this repository implements it. **Where code and spec
+disagree, the spec is right and the code is a bug.**
 
-**Do not change the protocol.** Several things in the spec look like they could
-be improved and are load-bearing:
+You do not get to resolve protocol questions. Simon does.
 
-- The HKDF info strings (`trig-write-v1`, `trig-record-v1`, `trig-mailbox-v1`,
-  `trig-pair-*`, `trig-devpair-*`) and the proof-of-work prefix `trig-pow-v1`
-  are byte-exact wire format. Changing one silently breaks interoperability with
-  every other implementation.
-- Signatures are computed over **raw concatenated bytes** in the documented field
-  order, never over serialised JSON. JSON key ordering and whitespace are not
-  stable across languages. Do not "simplify" this by signing the JSON.
-- AES-256-GCM was chosen over ChaCha20 variants for standard-library
-  availability on .NET, Java and WebCrypto. Do not switch it.
-- Base64url is **unpadded**. Accept unpadded input, never emit padding.
-- Signal channels are **first-write-wins**, rejecting a second write with `409`.
-  Overwrite semantics would turn the rendezvous into an injection point.
+This matters more than anything else here. The value of this project is not that
+the code got written — it is that every ambiguity was resolved deliberately,
+written back into the specification, and recorded in `DECISIONS.md` with its
+reasoning and its rejected alternatives. That is what makes design goal 3 —
+anyone can reimplement this from the spec in a weekend — true rather than
+aspirational.
 
-If something in the spec is ambiguous, underspecified or appears wrong, **raise
-it rather than resolving it in code**. Spec bugs get fixed in the spec.
+Resolve ambiguities silently in code and the spec drifts from the
+implementation, the vectors stop meaning anything, and the project quietly
+becomes "whatever trigstationd happens to do". That failure is invisible until
+somebody tries to write a second implementation and cannot.
 
----
+### So when the spec does not settle something
 
-## Non-negotiable design invariants
+1. **Stop that work item.** Do not pick something reasonable and continue.
+2. Write up the question: spec section, what is underspecified, the options,
+   what breaks if two implementations choose differently, and your
+   recommendation with reasoning.
+3. Prepare a concrete spec patch as a diff — the actual wording, not a
+   description of it.
+4. Bring it to Simon.
+5. On approval: apply the patch, append to `DECISIONS.md` in the existing
+   format, regenerate affected vectors, then resume.
 
-1. The directory never carries media. Address records and connection setup only.
-2. The directory cannot read what it stores. Records are encrypted to paired
-   clients; the server holds no decryption key and performs no key derivation.
-3. No accounts. No users table, no API keys, no allowlist, no CAPTCHA.
-4. Records are self-verifying. Authorisation is the signature, not a header.
-5. Records expire. Nothing accumulates.
-6. Any instance is replaceable. Instances never communicate with each other.
-7. **The API stays at four operations.** Anything that would add a fifth is a
-   proposal to make directories less replaceable. Do not add convenience
-   endpoints, health dashboards, metrics endpoints, or admin routes.
+Batch these. Ten questions at one stopping point is far better than ten
+interruptions.
 
----
+### You may decide freely, without asking
 
-## No request logging
-
-This is a hard requirement, not a configurable default.
-
-The code to log request paths, client IP addresses, lookup prefixes or channel
-identifiers **must not exist**. Not disabled, not behind a flag, not at debug
-level — absent.
-
-Error logs must not contain identifiers. When logging a failure, log the failure
-mode, never the value that caused it.
-
-This is the property that makes the service credible. A directory operator who
-cannot log is one who cannot be compelled to produce logs.
-
-### Operator configuration is not request-derived data
-
-The prohibition is on request-derived data, not on all output. Draw the line
-here, because it is easy to draw in the wrong place and both errors are costly —
-one leaks, the other suppresses output an operator legitimately needs.
-
-**May be printed.** Operator configuration echoed at startup: the bind address,
-the database path, the source URL, the configured limits. None of it is a record
-of anybody's request. A panic value and its stack may be printed too — a fault in
-this program is not a fact about a client, and a directory that fails silently is
-one nobody can debug, for no privacy gain.
-
-**May not be printed, ever.** Anything derived from a request, whether or not it
-also appears in configuration: a client address, a lookup prefix, a channel
-identifier, a request URI, a header value, an envelope byte. The origin of the
-value does not matter — what matters is that observing it tells you something
-about who was talking to the directory and what they asked for.
-
-The runtime silence test in `silence_test.go` asserts over *non-banner* output
-for exactly this reason. Its first version swept everything and failed on the
-startup banner, because the banner contains the bind address — which is the
-operator's own configuration and not a client's address, even though the two are
-the same kind of value.
-
-This distinction is also why `internal/api` permits exactly one function,
-`reportPanic`, to write to a process stream, and enforces that by name rather
-than by relaxing the rule.
+Package layout, error handling shape, test structure, naming, file organisation,
+sub-agent task breakdown, and anything else that does not change observable
+behaviour or the wire format. Record structural choices in your report; do not
+ask permission for them.
 
 ---
 
-## Go constraints
+## After a spec amendment: re-audit, then continue
 
-- **CGO must stay disabled.** Build with `CGO_ENABLED=0`. The deployment story is
-  a single static binary that cross-compiles from one machine, and that is what
-  makes directories genuinely replaceable.
-- **Use `modernc.org/sqlite`, not `mattn/go-sqlite3`.** The popular driver
-  requires CGO and a C toolchain, which breaks the above. Note the driver name
-  differs: `sqlite`, not `sqlite3`, in `sql.Open`.
-- **Standard library first.** The cryptography needed is `crypto/ed25519`,
-  `crypto/sha256` and `crypto/rand`. The directory never performs key agreement,
-  key derivation or decryption. `go.mod` should stay close to empty — justify any
-  dependency added beyond the SQLite driver.
-- Postgres support is optional, behind a build tag or config flag. SQLite is the
-  default.
-- Schema is the single table in `DIRECTORY-SPEC.md` §9. Signal channels are
-  memory-only and never persisted.
+Covered in CONTRIBUTING.md, repeated here because it is the step most likely to
+be skipped under momentum.
 
-Build check:
+Applying a spec patch is not the end of a ruling. Audit **every** existing
+package against **every** amendment in the batch, and put the audit in your next
+report as a table of amendment against package checked. A table reading "no
+change needed" in most cells is the evidence the audit happened.
 
-```
-CGO_ENABLED=0 go build ./... && CGO_ENABLED=0 go vet ./...
-```
+Three of eighteen amendments were once missed this way and found later by luck.
 
 ---
 
-## Licensing obligations
+## Reporting
 
-Licensed **AGPL-3.0-or-later**. Two consequences that affect the code itself.
+Stop at each phase boundary, and any time you accumulate spec questions.
 
-### Source file headers
+**To disk** — `docs/reports/<phase>.md`: spec ambiguities with a proposed patch
+for each, spec errors, judgement calls, dependencies added, verification output,
+and what is not done.
 
-Every `.go` file carries a notice, so the terms travel if a file is copied out of
-the repo. Full header in `main.go`:
+**To the terminal** — one screen: what was completed, what is blocked and on
+which decision, and the build/test verdict. Simon reads the file for detail.
 
-```go
-// Trigstation directory service — a zero-knowledge coordination service
-// for self-hosted media servers.
-// Copyright (C) 2026  Simon Wright
-//
-// This program is free software: you can redistribute it and/or modify it
-// under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or (at your
-// option) any later version.
-//
-// This program is distributed in the hope that it will be useful, but
-// WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
-// or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Affero General Public
-// License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
-```
-
-SPDX short form in every other file:
-
-```go
-// SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright (C) 2026 Simon Wright
-```
-
-New files get a header. This is not optional tidying.
-
-### Section 13 — the network clause
-
-AGPL §13 requires that anyone who modifies this software and offers it over a
-network gives those users a way to obtain the modified source.
-
-The conforming implementation is a `source_url` field in `GET /v1/meta`:
-
-```json
-{
-  "v": 1,
-  "record_count": 104233,
-  "source_url": "https://github.com/trigstation/trigstationd"
-}
-```
-
-It ships populated and documented so that compliance is the default rather than
-something an operator has to discover. An operator running a fork changes the URL
-to point at their own source.
-
-Do not remove this field, do not make it optional, and do not let it default to
-empty. It is a licence obligation expressed as code.
-
-This is an additive change to the v1 wire format, which the versioning policy in
-`DIRECTORY-SPEC.md` §10 permits.
+Commit as you go, with `git commit -s` per the DCO.
 
 ---
 
-## Testing
+## Two standards worth holding
 
-- Table-driven tests, standard library `testing`. No assertion framework.
-- **Test vectors are a deliverable, not a by-product.** A known `S_dir` and epoch
-  with expected `WriteSeed`, `WK_pub`, `LookupID`, `RecordKey`, and a fully
-  formed envelope, committed as JSON so independent implementations can verify
-  against the spec rather than against this codebase.
-- Cover the cases prose cannot pin down: epoch boundary behaviour, clock skew
-  fallback to the previous epoch, prefix bit-length maths at the limits,
-  rejection of over-precise prefix queries, proof-of-work verification, and
-  first-write-wins on signal channels.
-- Verify the rejection paths in §5.2 individually. Each one is a security
-  property, not an error case.
+**Verify, do not assert.** Never claim a build or test passes without having run
+it and seen the output. Query the registry, read the file, run the command. This
+applies to claims about other people's software too — the Caddy error-log
+behaviour that turned out to leak client addresses was found by reproducing it
+with a control, not by reading documentation.
 
----
-
-## Style
-
-- NZ/British spelling in comments, documentation and user-facing strings.
-  Identifiers follow Go convention.
-- Costs and figures in NZ dollars.
-- Errors returned, not logged and swallowed.
-- Prefer clarity over cleverness. Design goal 3 is that someone can reimplement
-  this from the spec in a weekend, and this codebase is the worked example.
+**Prove a test can fail.** Where a test guards something that matters, break the
+thing deliberately, confirm the test catches it, and restore. A test that cannot
+fail reads as coverage while providing none. This has already caught a false
+negative in this repository: a verification run that came back clean for both
+arms of an A/B, because a mangled path meant neither configuration had loaded.
+A symmetric result that looks like evidence is the most expensive thing in a
+verification exercise.
 
 ---
 
-## When you hit ambiguity
+## Working with Simon
 
-Stop and ask. Do not resolve protocol questions by picking something reasonable
-— a reasonable choice that differs from another implementation's reasonable
-choice is an interoperability failure that surfaces months later.
-
-The known-uncertain areas are listed in `DIRECTORY-SPEC.md` §11.
+- Solo developer, limited evening time. Be realistic about scope, and say
+  plainly when something is a multi-month commitment rather than a session.
+- Be direct. Push back on bad ideas, name trade-offs explicitly, and state
+  honest limitations rather than presenting work as airtight.
+- Prefer concrete specification over architecture talk — byte layouts, endpoint
+  contracts, failure modes.
+- Do not re-explain settled decisions back to him. `DECISIONS.md` is the record;
+  if you think one is wrong, say so once with a concrete new argument and let
+  him decide.
 
 ---
 
-## After a spec amendment: re-audit every package
+## Provenance
 
-**Applying a spec patch is not the end of a ruling.** The code that was written
-before the amendment does not implement it, and nothing will tell you.
-
-This is not hypothetical. Eighteen amendments landed during phase 2 after five
-packages had already been written and committed. Three of them — duplicate JSON
-members, leading zeros in `bits`, the draining-instance `429` — were never
-implemented. They were found later, by a task that happened to test across a
-package boundary. A process that catches this by luck is not a process.
-
-So, after applying **any** batch of spec patches, and before continuing with
-feature work:
-
-1. Audit every existing package against every amendment in the batch. Not only
-   the packages that look related — the three that were missed were in
-   `internal/accept`, `internal/query` and `internal/signal`, and each looked
-   like somebody else's problem from the others.
-2. Record the audit in the next report as a table: amendment against package
-   checked, with the outcome. A table with "no change needed" in most cells is
-   the evidence that the audit happened.
-3. Only then resume.
-
-The corollary is that a conformance gap found this way is a process failure
-worth reporting, not just a bug worth fixing.
+This project was built with substantial AI assistance, and this file is part of
+the record of how. It is kept rather than removed because hiding it would be
+dishonest, and because the reasoning in the specification and `DECISIONS.md`
+stands or falls on its own merits regardless of who typed it.

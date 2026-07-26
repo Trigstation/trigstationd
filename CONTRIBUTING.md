@@ -38,9 +38,29 @@ docker run --rm -v "$PWD:/src" -w /src -e CGO_ENABLED=1 golang:1.26 \
   go test ./... -race -count=1
 ```
 
-## Four constraints that are not negotiable
+## Non-negotiable constraints
 
-These are the ones a well-intentioned change breaks by accident.
+**These are project constraints, not style preferences, and they bind every
+contributor.** They used to live in `CLAUDE.md`, which was the wrong home: a
+human reading that file could reasonably assume it was addressed to somebody
+else. The normative statement is here; `CLAUDE.md` now defers to it.
+
+### The design invariants
+
+From `DIRECTORY-SPEC.md`. A change that breaks one of these is a proposal to
+make this a different project, and belongs in the spec repository as an issue
+rather than here as a pull request.
+
+1. The directory never carries media. Address records and connection setup only.
+2. The directory cannot read what it stores. It holds no decryption key and
+   performs no key derivation.
+3. No accounts. No users table, no API keys, no allowlist, no CAPTCHA.
+4. Records are self-verifying. Authorisation is the signature, not a header.
+5. Records expire. Nothing accumulates.
+6. Any instance is replaceable. Instances never communicate with each other.
+7. The API stays at four operations.
+
+### Four constraints a well-intentioned change breaks by accident
 
 **1. The code to log request data must not exist.** Not disabled, not behind a
 flag, not at debug level — absent. No client address, request path, lookup
@@ -50,10 +70,26 @@ packages parse their own source for rendering calls applied to
 identifier-bearing values, and `silence_test.go` runs the real binary and
 asserts it writes nothing beyond its startup banner.
 
-Operator configuration echoed at startup is not request-derived data and may be
-printed. A panic value and its stack may be printed, with no request context.
-The distinction is in [CLAUDE.md](CLAUDE.md); get it wrong in either direction
-and you either leak or you make the service undebuggable.
+The prohibition is on **request-derived data**, not on all output, and the line
+matters in both directions — one error leaks, the other makes the service
+undebuggable.
+
+*May be printed.* Operator configuration echoed at startup: the bind address,
+the database path, the source URL, the configured limits. None of it records
+anybody's request. A panic value and its stack may be printed too — a fault in
+this program is not a fact about a client, and a directory that fails silently
+is one nobody can debug, for no privacy gain.
+
+*May not be printed, ever.* Anything derived from a request, whether or not it
+also appears in configuration: a client address, a lookup prefix, a channel
+identifier, a request URI, a header value, an envelope byte. The origin of the
+value does not matter; what matters is that observing it tells you something
+about who was talking to the directory and what they asked for.
+
+`silence_test.go` asserts over *non-banner* output for exactly this reason. Its
+first version swept everything and failed on the startup banner, because the
+banner contains the bind address — the operator's own configuration, not a
+client's address, even though the two are the same kind of value.
 
 **2. `CGO_ENABLED=0` must build, and cross-compile.** The deployment story is a
 single static binary produced from one machine, and that is what makes
@@ -75,9 +111,14 @@ amendment does not implement it and nothing will tell you. Audit every existing
 package against every amendment in the batch, and record the audit as a table of
 amendment against package checked.
 
-This is not hypothetical: three of eighteen amendments were once missed this
-way, and were found by a later task that happened to test across a package
-boundary. [CLAUDE.md](CLAUDE.md) has the full note.
+Audit **every** package, not only the ones that look related: the three
+amendments once missed this way were in `internal/accept`, `internal/query` and
+`internal/signal`, and each looked like somebody else's problem from the others.
+They were found by a later task that happened to test across a package boundary,
+which is catching it by luck rather than by process.
+
+A conformance gap found this way is a process failure worth reporting, not just
+a bug worth fixing.
 
 ## Testing style
 
@@ -110,6 +151,17 @@ go run ./cmd/gen-api-vectors  -o testdata/api-vectors.json
 
 and say in the pull request **why** a value changed. An unexplained vector diff
 is a protocol change wearing a code change as a disguise.
+
+## Code of conduct
+
+There isn't one yet, and that is deliberate rather than an oversight:
+governance documents for a community that does not exist are overhead nobody
+benefits from.
+
+The trigger is recorded so the decision is not simply forgotten. The Contributor
+Covenant goes in when the first outside contribution lands, or when the project
+is linked somewhere public with a discussion attached — whichever comes first.
+Until then, the standard is ordinary professional courtesy.
 
 ## Licence headers
 

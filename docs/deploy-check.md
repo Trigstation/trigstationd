@@ -263,10 +263,20 @@ instance against itself.
   roughly two-thirds of the lifetime. It will not email you if it fails, because
   the shipped `Caddyfile` sets no ACME account address — if you want expiry
   warnings, add `email you@example.com` to the global block.
-- **Back up nothing.** The database holds ciphertext that expires within 48
-  hours. An instance that loses its database recovers as servers republish, and
-  §4.3's TTL bounds how long that takes. A backup would be a copy of exactly the
-  data the design tries not to accumulate.
+- **Back up nothing, and mean it.** A directory holds no data worth preserving.
+  Records are ciphertext the operator cannot read, they expire within 48 hours
+  (§4.3), and signal channels are memory-only and never persisted. An instance
+  that loses its database recovers as servers republish — worst case one
+  keepalive interval, around six hours — and during that window it is simply the
+  directory that did not answer first, which §7 already treats as normal
+  operation rather than an outage.
+
+  Backups are not merely unnecessary here, they are **contrary to invariant 5**.
+  The property that nothing accumulates is one an operator can give up
+  accidentally, and a nightly snapshot of a table designed to expire is the most
+  likely way to do it: it turns 48 hours of ciphertext into an indefinite
+  archive of it, on a host that may be backed up somewhere else again. Nothing
+  in the service can prevent this, which is precisely why it is worth saying.
 - **Publish your instance** so servers can find it, and note that servers SHOULD
   publish to at least two directories (§7). A second instance run by somebody
   else is worth more to the network than a second region of yours.
