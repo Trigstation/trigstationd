@@ -58,7 +58,6 @@ package accept
 
 import (
 	"encoding/json"
-	"strings"
 
 	"github.com/trigstation/trigstationd/internal/pow"
 	"github.com/trigstation/trigstationd/internal/record"
@@ -245,33 +244,5 @@ func parse(body []byte) (*record.Envelope, bool) {
 		return nil, false
 	}
 
-	if !unpadded(&env) {
-		return nil, false
-	}
 	return &env, true
-}
-
-// unpadded reports whether every base64url member is spelled without padding.
-//
-// §4.4 defines the encoding as RFC 4648 §5 without '=', and the §5.2 status
-// table makes a value that is "not valid unpadded base64url" a 400. The b64
-// package tolerates trailing padding as a general-purpose decoder, so that a
-// peer violating the rule still interoperates on paths where nothing turns on
-// the spelling; the acceptance pipeline is not such a path, because §5.2 stores
-// and re-serves the envelope verbatim. A padded envelope accepted here would be
-// handed back unchanged to every client that queries the prefix.
-//
-// NOTE: whether a directory MUST reject padded input, or SHOULD accept it, is
-// not settled by the specification — §4.4 says only that implementations MUST
-// accept unpadded input and MUST NOT emit padding. See the open question raised
-// with this package. Java's Base64.getUrlEncoder() and Python's
-// base64.urlsafe_b64encode both pad by default, so the answer decides whether a
-// publisher on those platforms works against every directory or none.
-func unpadded(env *record.Envelope) bool {
-	for _, v := range [...]string{env.LookupID, env.WKPub, env.CT, env.Nonce, env.PoW, env.Sig} {
-		if strings.Contains(v, "=") {
-			return false
-		}
-	}
-	return true
 }

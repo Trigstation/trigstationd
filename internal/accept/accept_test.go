@@ -625,12 +625,14 @@ func TestSizeBoundary(t *testing.T) {
 }
 
 // TestBase64Spelling covers the §5.2 row for a value that is not valid unpadded
-// base64url, in each of the three ways a field can be spelled wrongly.
+// base64url, in each of the ways a field can be spelled wrongly.
 //
-// The padded cases assert the strict reading of §5.2: the b64 package tolerates
-// trailing padding as a general-purpose decoder, but this pipeline stores the
-// envelope verbatim and re-serves those bytes, so it does not. See the note on
-// unpadded — whether the specification requires this is an open question.
+// §4.4 rejects padded and non-canonical input outright, and internal/b64
+// enforces both, so this pipeline no longer carries its own check. The cases
+// stay here regardless: they assert the behaviour at the boundary that actually
+// faces the wire, which is where a regression in the decoder would matter, and
+// they would fail if the rule were ever relaxed a layer down. See DECISIONS.md
+// C-9 and C-10.
 func TestBase64Spelling(t *testing.T) {
 	tests := []struct {
 		name   string

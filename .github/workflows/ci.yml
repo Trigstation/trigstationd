@@ -1,0 +1,158 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Simon Wright
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build, vet, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # The floor is set by modernc.org/sqlite, which declares go 1.25.0.
+          # go.mod is the single source of truth; do not pin a version here.
+          go-version-file: go.mod
+          check-latest: true
+
+      # The deployment story is a single static binary that cross-compiles from
+      # one machine, so the ordinary build is the CGO-free one.
+      - name: build
+        env:
+          CGO_ENABLED: 0
+        run: go build ./...
+
+      - name: vet
+        env:
+          CGO_ENABLED: 0
+        run: go vet ./...
+
+      - name: test
+        env:
+          CGO_ENABLED: 0
+        run: go test ./... -count=1
+
+      # The race detector requires cgo, so this is the one job that enables it.
+      # It does not weaken the CGO_ENABLED=0 constraint: that governs the
+      # shipped binary, not the test harness. This job exists because the
+      # constraint means the check cannot run natively on a developer machine
+      # without a C toolchain, and internal/signal and internal/ratelimit are
+      # the only packages in the tree with interesting concurrency.
+      - name: test -race
+        env:
+          CGO_ENABLED: 1
+        run: go test ./... -race -count=1
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "gofmt reports these files need formatting:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      # The vectors are a shipped deliverable, so a change to the code that
+      # silently changes them must fail rather than land. Regeneration is
+      # deterministic; a diff here means either an intended protocol change that
+      # needs the committed file updated, or an unintended one.
+      - name: vectors are reproducible
+        env:
+          CGO_ENABLED: 0
+        run: |
+          go run ./cmd/gen-vectors -o /tmp/vectors.json
+          diff -u testdata/vectors.json /tmp/vectors.json
+
+  static:
+    name: static cross-compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      # Directories are only genuinely replaceable if one machine can produce a
+      # binary for any of them. This proves the SQLite driver has not acquired a
+      # cgo dependency, which is the way that property would be lost quietly.
+      - name: cross-compile
+        env:
+          CGO_ENABLED: 0
+        run: |
+          for target in linux/amd64 linux/arm64 darwin/arm64 windows/amd64; do
+            GOOS=${target%/*} GOARCH=${target#*/} go build -o /dev/null ./... \
+              && echo "ok  $target" \
+              || { echo "FAIL $target"; exit 1; }
+          done
+
+  licence:
+    name: licence headers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Every .go file carries a notice so the terms travel if a file is copied
+      # out of the repo. This is a licence obligation, not tidying, so it is
+      # enforced rather than reviewed.
+      - name: every .go file has an SPDX header
+        run: |
+          missing=0
+          while IFS= read -r f; do
+            if ! head -3 "$f" | grep -qE 'SPDX-License-Identifier: AGPL-3\.0-or-later|Trigstation directory service'; then
+              echo "missing licence header: $f"
+              missing=1
+            fi
+          done < <(find . -name '*.go' -not -path './.git/*')
+          exit $missing
+
+  logging:
+    name: no request logging
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The code to log request paths, client addresses, lookup prefixes or
+      # channel identifiers must not exist — not disabled, not behind a flag,
+      # absent. A grep is a blunt instrument, but the invariant is worth a blunt
+      # instrument: it catches the import, and the per-package source checks in
+      # internal/ratelimit, internal/store and elsewhere catch the subtler ways
+      # a value reaches an output stream.
+      #
+      # This uses the compiler's own import graph rather than a text search.
+      # grep cannot tell an import from a string literal, and internal/ratelimit
+      # self-tests its source checker against fixtures that deliberately contain
+      # `import "log"` — so a grep reports the guard as the violation, which
+      # trains everyone to ignore the check. go list sees only real imports, for
+      # the package, its tests and its external tests alike.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: no logging imports anywhere in the tree
+        env:
+          CGO_ENABLED: 0
+        run: |
+          found=$(go list -f '{{$p := .ImportPath}}{{range .Imports}}{{$p}} {{.}}
+          {{end}}{{range .TestImports}}{{$p}} {{.}}
+          {{end}}{{range .XTestImports}}{{$p}} {{.}}
+          {{end}}' ./... | grep -E ' (log|log/slog|log/syslog)$' || true)
+          if [ -n "$found" ]; then
+            echo "$found"
+            echo
+            echo "A logging package is imported. This is a hard requirement:"
+            echo "the code to log request data must not exist, not merely be disabled."
+            exit 1
+          fi
+          echo "no logging imports"

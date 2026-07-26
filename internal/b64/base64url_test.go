@@ -60,10 +60,20 @@ func TestDecode(t *testing.T) {
 		wantErr bool
 	}{
 		{"unpadded", "AQID", []byte{1, 2, 3}, false},
-		// The spec mandates accepting unpadded input; padded input is tolerated
-		// here as a courtesy to a peer that violates "MUST NOT emit padding".
-		{"padded is tolerated", "AQI=", []byte{1, 2}, false},
-		{"padded two chars", "AQ==", []byte{1}, false},
+		// §4.4: padded input is rejected as malformed, never stripped. This
+		// reverses the phase 1 behaviour. The reason is §5.2's verbatim
+		// storage — a directory that accepted padding would store those bytes
+		// and serve them unchanged to every client, including strict ones, so
+		// tolerating a malformed encoding distributes it rather than absorbing
+		// it. See DECISIONS.md C-9.
+		{"padded one char is rejected", "AQI=", nil, true},
+		{"padded two chars is rejected", "AQ==", nil, true},
+		// §4.4: the encoding must be canonical, so the unused low bits of the
+		// final character are zero. Under a non-strict decoder "AQI" and "AQJ"
+		// both yield {1, 2}, giving one value two spellings — and under
+		// verbatim storage both would be accepted and both served.
+		{"canonical trailing bits", "AQI", []byte{1, 2}, false},
+		{"non-canonical trailing bits is rejected", "AQJ", nil, true},
 		{"url alphabet decodes", "-_8", []byte{0xfb, 0xff}, false},
 		{"standard alphabet rejected", "+/8", nil, true},
 		{"not base64", "!!!!", nil, true},
