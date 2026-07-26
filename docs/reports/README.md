@@ -14,6 +14,8 @@ snapshot.
 | *(phase 1 — missing, see below)* | Key derivations, envelope and payload handling, proof of work, base64url, first test vectors |
 | [phase-1b.md](phase-1b.md) | Reconciliation against the amended `DIRECTORY-SPEC.md`; detached payload signature; pairing vectors |
 | [phase-2-preflight.md](phase-2-preflight.md) | Fresh-eyes spec review before phase 2: eight rulings sought, five editorial errors, sub-agent breakdown |
+| [phase-2-questions.md](phase-2-questions.md) | Eighteen further questions raised while building phase 2, each with a recommendation and a patch |
+| [phase-2.md](phase-2.md) | Storage, the four operations, deployment. The service runs. |
 
 ## The missing phase 1 report
 
