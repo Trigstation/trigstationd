@@ -66,16 +66,37 @@ func TestTheServerSaysNothingAboutRequests(t *testing.T) {
 		"-db", filepath.Join(dir, "records.db"),
 		"-pow-bits", strconv.Itoa(powBits),
 	)
+	// exec.Cmd spawns a goroutine to copy each stream when Stdout is an
+	// io.Writer rather than an *os.File, so the buffer must not be read while
+	// the process is alive. Stopping the process and waiting for it joins those
+	// goroutines, which is both race-free and the only way to be sure every byte
+	// the server wrote has been captured.
+	//
+	// The first version of this test read the buffer with the process still
+	// running. It passed locally and every time; the race detector caught it on
+	// CI's first run, which is why the -race job exists.
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("starting the binary: %v", err)
 	}
-	defer func() {
+
+	stopped := false
+	stop := func() {
+		if stopped {
+			return
+		}
+		stopped = true
 		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
-	}()
+		// cmd.Wait, not cmd.Process.Wait. They are not interchangeable here:
+		// os.Process.Wait reaps the process and returns, while exec.Cmd.Wait
+		// additionally waits for the stream-copying goroutines to finish. Only
+		// the latter makes the buffer safe to read, and using the former is why
+		// the first attempt at this fix still raced.
+		_ = cmd.Wait()
+	}
+	defer stop()
 
 	waitForListener(t, addr)
 	base := "http://" + addr
@@ -102,8 +123,10 @@ func TestTheServerSaysNothingAboutRequests(t *testing.T) {
 	// A replay, which is a 409 and the most "interesting" rejection there is.
 	drive(t, http.MethodPut, base+"/v1/record", env)
 
-	// Give the process a moment to write anything it was going to write.
-	time.Sleep(300 * time.Millisecond)
+	// Stop the server and join its output goroutines before reading a byte of
+	// the buffer. Anything it was going to write about those requests has been
+	// written by the time Wait returns.
+	stop()
 	got := out.String()
 
 	// The startup banner is expected, and is the only expected line. It names
