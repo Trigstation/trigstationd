@@ -75,7 +75,7 @@ func TestDefaultLimits(t *testing.T) {
 		class Class
 		want  int
 	}{
-		{"put record 120 per hour", ClassPutRecord, 120},
+		{"put record 600 per hour", ClassPutRecord, 600},
 		{"get record 600 per hour", ClassGetRecord, 600},
 		{"signal 600 per hour combined", ClassSignal, 600},
 	}

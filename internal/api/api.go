@@ -59,9 +59,12 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/netip"
+	"os"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -234,7 +237,7 @@ func (s *Server) Routes() []string {
 // a cross-origin caller can do nothing a direct caller cannot.
 // Access-Control-Allow-Credentials is never sent, from anywhere in this package.
 //
-// # Why a panic is recovered and discarded
+// # Why a panic is recovered here, and what is reported
 //
 // net/http, with no ErrorLog configured, logs a handler panic through the
 // standard logger as "http: panic serving <client address>: …". That writes a
@@ -244,18 +247,32 @@ func (s *Server) Routes() []string {
 // requirement is that the code to log must not exist rather than be configured
 // off, with CI enforcing it through the import graph.
 //
-// So the panic is stopped before net/http can see it. The value is not
-// formatted, not stored and not re-panicked; the client gets a bare 500 if
-// nothing has been written yet, and the process keeps serving. Discarding a
-// panic value is not good practice in general and is the right trade here: the
-// alternative is a code path that prints a client address.
+// So the panic is stopped before net/http can see it, and this package reports
+// it instead, on its own terms.
+//
+// **The panic value and stack are written to stderr. No request context is.**
+// That distinction is the whole point. CLAUDE.md forbids identifiers in error
+// output, not error output: a panic is a fault in this program, and an operator
+// needs to see it or they are running something that fails silently and cannot
+// be debugged. What must not appear alongside it is anything identifying the
+// request that provoked it — no address, no path, no query, no headers, no
+// lookup prefix, no channel identifier. A stack trace names functions and source
+// lines, which are properties of the binary and disclose nothing about whoever
+// happened to be talking to it.
+//
+// The client gets a bare 500 if nothing has been written yet, and the process
+// keeps serving.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	tracked := &trackingWriter{ResponseWriter: w}
 
 	defer func() {
-		if recover() == nil {
+		v := recover()
+		if v == nil {
 			return
 		}
+
+		reportPanic(v)
+
 		if !tracked.wrote {
 			tracked.WriteHeader(http.StatusInternalServerError)
 		}
@@ -265,6 +282,34 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		tracked.Header().Set("Access-Control-Allow-Origin", "*")
 	}
 	s.mux.ServeHTTP(tracked, r)
+}
+
+// reportPanic writes a handler panic to stderr: the value, then the stack.
+//
+// This is the **only** function in this package permitted to write to a process
+// output stream, and TestNoDirectOutput enforces that by name — a write to
+// os.Stderr anywhere else in the package fails the build. Confining it to one
+// function is what keeps the distinction reviewable: there is a single place to
+// check that nothing request-derived is being emitted, rather than a rule about
+// stderr scattered across three files.
+//
+// What is emitted, and why it is not request logging:
+//
+//   - The panic value. Whatever the panicking code passed — a runtime error from
+//     a nil dereference or an index out of range, or an explicit panic from this
+//     codebase. Nothing in this repository panics with a client identifier, and
+//     the runtime's own errors describe program state rather than input.
+//   - The stack. Function names and source lines, which are properties of the
+//     binary. A stack discloses what this program did, not who asked it to.
+//
+// What is deliberately absent: the request. No address, no method, no path, no
+// query string, no headers, no lookup prefix, no channel identifier. That is the
+// line CLAUDE.md actually draws — identifiers must not reach error output, not
+// that error output must not exist. A directory that faults silently is one an
+// operator cannot debug, and there is no privacy gain in that.
+func reportPanic(v any) {
+	fmt.Fprintf(os.Stderr, "trigstationd: panic in a handler: %v\n", v)
+	os.Stderr.Write(debug.Stack())
 }
 
 // Drain releases every in-flight long-poll so that a graceful shutdown does not
@@ -339,8 +384,10 @@ func preflight(methods string) http.HandlerFunc {
 //
 // Where several X-Forwarded-For field-lines arrive they are joined in order,
 // which RFC 9110 §5.3 makes equivalent to the single combined field the
-// extractor expects — and which keeps the rightmost entry of the whole being
-// the one the trusted proxy appended.
+// extractor expects — and which keeps the right-hand end of the combined value
+// the entry the innermost trusted proxy appended. §6.4 consumes entries from
+// that end while each is itself trusted, so joining in arrival order is what
+// makes the walk see the chain in the order it actually happened.
 func (s *Server) allow(r *http.Request, c ratelimit.Class, now time.Time) bool {
 	forwarded := strings.Join(r.Header.Values("X-Forwarded-For"), ",")
 	return s.limiter.Allow(s.client.Addr(peerAddr(r), forwarded), c, now)

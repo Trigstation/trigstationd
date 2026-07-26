@@ -529,7 +529,7 @@ func TestTrustMatching(t *testing.T) {
 		{"several prefixes, none matches", "127.0.0.0/8, 172.17.0.0/16", "192.0.2.1", false},
 		{"host bits in the configured prefix are ignored", "192.0.2.77/24", "192.0.2.1", true},
 		{"mapped IPv4 prefix still matches an IPv4 peer", "::ffff:172.17.0.0/112", "172.17.0.5", true},
-		{"the whole IPv4 internet", "0.0.0.0/0", "198.51.100.7", true},
+		{"a broad private range", "10.0.0.0/8", "10.200.30.40", true},
 	}
 
 	// A distinctive forwarded address: seeing it in the result means the peer
@@ -769,4 +769,83 @@ func TestJoinedFieldLines(t *testing.T) {
 	if e.Addr(peer, strings.Join(lines, ",")) != want {
 		t.Errorf("joining the field-lines in arrival order did not yield the proxy's observation")
 	}
+}
+
+// TestTrustingEverythingFallsBackToThePeer covers the degenerate configuration
+// an operator reaches for when the trusted list "does not seem to work":
+// trusting the whole internet.
+//
+// Under the walk of §6.4 every entry in the header is a trusted proxy, so the
+// list is exhausted and there is no client address in it — the peer is the
+// nearest true observation and is what is returned.
+//
+// This is worth its own test because the rightmost-only rule it replaced was
+// *bypassable* in this configuration: any client could set X-Forwarded-For and
+// have that value taken as its own limiter key, with no proxy involved at all.
+// The walk closes that. A configuration that trusts everything is now merely
+// useless rather than an open door, and useless-not-dangerous is the failure
+// direction §6.4 asks for throughout.
+func TestTrustingEverythingFallsBackToThePeer(t *testing.T) {
+	e := extractor(t, "0.0.0.0/0")
+	peer := addr(t, "198.51.100.7")
+
+	for _, xff := range []string{
+		"1.2.3.4",
+		"1.2.3.4, 5.6.7.8",
+		"9.9.9.9, 1.2.3.4, 203.0.113.9",
+	} {
+		t.Run(xff, func(t *testing.T) {
+			if e.Addr(peer, xff) != peer {
+				t.Error("Addr did not return the peer: with everything trusted " +
+					"the header holds no client address, and taking one from it " +
+					"would let any client choose its own limiter key")
+			}
+		})
+	}
+}
+
+// TestChainWalk covers the multi-proxy case §6.4 added: entries are consumed
+// from the right while each is itself trusted, and the first that is not is the
+// client.
+//
+// The shape modelled is client → CDN → inner proxy → directory, where the client
+// has spoofed a header of its own. Each hop appends what it observed, so the
+// arriving value is "spoofed, client_real, cdn_egress" and the peer is the inner
+// proxy.
+func TestChainWalk(t *testing.T) {
+	const (
+		spoofed    = "1.2.3.4"
+		clientReal = "203.0.113.9"
+		cdnEgress  = "192.0.2.50"
+	)
+	peer := addr(t, "172.28.0.5")
+
+	t.Run("every hop enumerated finds the true client", func(t *testing.T) {
+		e := extractor(t, "172.28.0.0/24,192.0.2.0/24")
+		if e.Addr(peer, spoofed+", "+clientReal+", "+cdnEgress) != addr(t, clientReal) {
+			t.Error("the walk did not return the true client: it must skip the " +
+				"trusted CDN egress and stop at the first untrusted entry")
+		}
+	})
+
+	t.Run("the spoofed entry is never reachable", func(t *testing.T) {
+		e := extractor(t, "172.28.0.0/24,192.0.2.0/24")
+		if e.Addr(peer, spoofed+", "+clientReal+", "+cdnEgress) == addr(t, spoofed) {
+			t.Fatal("the client-supplied leftmost entry was used; every entry to " +
+				"its right must be trusted before it can be reached")
+		}
+	})
+
+	t.Run("under-enumeration degrades safely, never to a bypass", func(t *testing.T) {
+		// The CDN's range is not listed, so the walk stops at it. Every client
+		// behind that CDN shares one key: useless, but not forgeable.
+		e := extractor(t, "172.28.0.0/24")
+		got := e.Addr(peer, spoofed+", "+clientReal+", "+cdnEgress)
+		if got != addr(t, cdnEgress) {
+			t.Error("with the CDN unlisted the walk must stop at the CDN egress")
+		}
+		if got == addr(t, spoofed) {
+			t.Fatal("under-enumeration must never expose the spoofed entry")
+		}
+	})
 }

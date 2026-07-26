@@ -168,11 +168,77 @@ func (e *Extractor) Addr(peer netip.Addr, xff string) netip.Addr {
 		return p
 	}
 
-	forwarded, ok := parseEntry(rightmostEntry(xff))
-	if !ok {
-		return p
+	return e.walk(xff, p)
+}
+
+// walk consumes X-Forwarded-For entries from the right while each is itself a
+// trusted proxy, and returns the first that is not. That address is the client.
+//
+// # Why a walk, and why it is safe
+//
+// With one proxy this returns the rightmost entry and nothing more. The walk
+// matters once a chain exists: with a CDN in front of a reverse proxy the
+// rightmost entry is the address the inner proxy observed — the *outer proxy* —
+// so taking it regardless would put every client behind that CDN into one
+// rate-limiter key. That is the outage §6.4 exists to prevent, reintroduced by
+// following its first sentence literally.
+//
+// Walking leftward over attacker-influenced entries sounds like the bypass this
+// package is written to close, and it would be without the stopping condition.
+// An entry is only ever reached when *every* entry to its right is trusted, so
+// a client-supplied value is unreachable unless the operator has trusted the
+// client's own address. The spoofed leftmost entry of
+//
+//	"1.2.3.4, client_real, cdn_egress"
+//
+// is never consulted: cdn_egress is trusted so it is skipped, client_real is not
+// so the walk stops and returns it.
+//
+// The failure direction is safe. An operator who under-enumerates the hops gets
+// a walk that stops early at a proxy's address, collapsing clients behind it
+// into one key — useless, but exactly the single-proxy behaviour, and never
+// bypassable.
+//
+// Note the hazard §6.4 states and this code cannot enforce: a trusted range that
+// is *shared* trusts every party able to send from it. Listing a CDN's egress
+// ranges permits any customer of that CDN to forge a client address.
+func (e *Extractor) walk(xff string, peer netip.Addr) netip.Addr {
+	rest := xff
+	for {
+		entry, remainder, found := lastEntry(rest)
+		if entry == "" && !found {
+			// Ran out of entries: every one was a trusted proxy. There is no
+			// client address in the header, so the nearest true observation is
+			// the peer.
+			return peer
+		}
+
+		addr, ok := parseEntry(entry)
+		if !ok {
+			// An unparseable entry stops the walk at the peer rather than
+			// stepping past it. The next entry along is attacker-influenced,
+			// and skipping to it is the bypass wearing a different hat.
+			return peer
+		}
+		if !e.trusts(addr) {
+			return addr
+		}
+		rest = remainder
 	}
-	return forwarded
+}
+
+// lastEntry splits the final comma-separated entry from an X-Forwarded-For
+// value, returning it trimmed along with everything to its left. found reports
+// whether an entry was present at all, which distinguishes an exhausted list
+// from one whose final entry is empty.
+func lastEntry(s string) (entry, remainder string, found bool) {
+	if strings.TrimSpace(s) == "" {
+		return "", "", false
+	}
+	if i := strings.LastIndexByte(s, ','); i >= 0 {
+		return strings.TrimSpace(s[i+1:]), s[:i], true
+	}
+	return strings.TrimSpace(s), "", true
 }
 
 // trusts reports whether a is inside one of the configured prefixes.

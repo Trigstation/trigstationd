@@ -62,8 +62,9 @@
 // The known cost of a fixed window is that a client may issue up to twice the
 // limit across a window boundary. That is tolerable here and only here: §6.4
 // requires limits set generously rather than tightly, because a /24 bucket is
-// up to 256 hosts, and §9.1 puts honest publish volume at around one request
-// per server per day against a limit of 120 per hour.
+// far more than 256 hosts once carrier-grade NAT is involved, and §9.1 puts
+// honest publish volume at a handful of requests per server per day against a
+// limit of 600 per hour.
 //
 // Windows are per key rather than globally aligned, so buckets do not all roll
 // over on the same instant and a flooder cannot synchronise a burst to it.
@@ -110,10 +111,22 @@ const (
 // to 256 hosts share a bucket, and a server behind carrier-grade NAT must not
 // be limited by a stranger's behaviour.
 const (
-	// DefaultPutRecord is 120 publishes per key per window. An honest server
+	// DefaultPutRecord is 600 publishes per key per window. An honest server
 	// publishes on daily epoch rollover, on address change, and on a 6-hourly
-	// keepalive: a handful per day, not per hour.
-	DefaultPutRecord = 120
+	// keepalive: call it ten per day, not per hour.
+	//
+	// It matches the other two rather than sitting below them, because the /24
+	// arithmetic is misleading. A /24 suggests 256 hosts; a carrier-grade NAT
+	// /24 can front thousands of subscribers, and a few hundred servers behind
+	// one is enough to exceed a tighter limit. The failure would be a 429 on
+	// publish, which reaches the operator as a directory that intermittently
+	// refuses them for no visible reason — the least diagnosable outcome
+	// available, since §5.2 response bodies carry no detail.
+	//
+	// §6.4 asks for limits set well above honest use rather than tightly. At
+	// ten publishes per server per day, 600 per hour is roughly six thousand
+	// honest servers behind one key before an honest publish is ever refused.
+	DefaultPutRecord = 600
 
 	// DefaultGetRecord is 600 lookups per key per window. A lookup happens
 	// about once per session (§2), so this is five per minute sustained.

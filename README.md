@@ -119,7 +119,7 @@ where both are given. `trigstationd -h` prints this list.
 | `-max-ttl` | `TRIGSTATIOND_MAX_TTL` | `172800` | Maximum record lifetime, in seconds. |
 | `-max-record-bytes` | `TRIGSTATIOND_MAX_RECORD_BYTES` | `4096` | Maximum envelope size as transmitted. |
 | `-signal` | `TRIGSTATIOND_SIGNAL` | `true` | Broker signal channels. When off, `/v1/meta` reports `signal: false` and `/v1/signal/{id}` answers 404. |
-| `-rate-put` | `TRIGSTATIOND_RATE_PUT` | `120` | `PUT /v1/record` allowance per source per hour. |
+| `-rate-put` | `TRIGSTATIOND_RATE_PUT` | `600` | `PUT /v1/record` allowance per source per hour. See the note below. |
 | `-rate-get` | `TRIGSTATIOND_RATE_GET` | `600` | `GET /v1/record` allowance per source per hour. |
 | `-rate-signal` | `TRIGSTATIOND_RATE_SIGNAL` | `600` | Signal channel allowance per source per hour. |
 
@@ -128,6 +128,75 @@ Rate limits are counted per class and keyed by a truncated address — IPv4 to
 `/24` key means up to 256 hosts share a bucket, so §6.4 says to set the
 allowances well above honest use rather than tightly. Honest publish volume is
 about one request per server per day.
+
+### Verifying that your deployment logs nothing
+
+`DIRECTORY-SPEC.md` §9.2 makes this a property of the **deployment**, not of the
+binary, and requires an operator to verify it rather than assume it. The
+directory contains no code to log a request; that is worth nothing if something
+else in the path does it for you.
+
+Three things see your clients, and all three need checking:
+
+**1. The directory.** Should emit one line ever — the startup banner.
+
+```
+docker compose logs trigstationd
+# trigstationd: listening on :8080
+```
+
+Anything else is a bug; please report it. A panic report is the one exception,
+and it deliberately carries the fault and the stack but no request context.
+
+**2. The proxy.** Caddy's access log is off by default, **but its error log is
+on**, and that one records `remote_ip`, `client_ip` and the full request URI —
+including the lookup prefix — on any per-request failure. A rolling restart of
+the directory is enough to write every current client's address to your journal.
+
+Disabling the access log does **not** stop it: they are different loggers. The
+shipped `Caddyfile` excludes both. To verify on your own deployment, provoke a
+failure and check:
+
+```
+docker compose stop trigstationd
+curl -sk https://your.domain/v1/record?prefix=deadbeef -o /dev/null   # 502
+docker compose start trigstationd
+docker compose logs caddy | grep -iE 'remote_ip|client_ip|deadbeef|"uri"'
+# must print nothing
+```
+
+If that grep prints anything, your proxy is logging your users and the property
+this service claims is not one you have.
+
+**3. The container runtime and the host journal.** Docker captures whatever the
+containers write to stdout and stderr. With both silenced there is nothing to
+capture, which is why steps 1 and 2 are the whole of it — but if you add a
+logging driver, a sidecar, or a log shipper, you have added a fourth thing that
+sees everything and you need to check it too.
+
+If you put a CDN in front for DDoS protection, understand that it sees every
+client address and every lookup prefix in the clear. That is the correlation
+data this design exists to remove, handed to a third party. It is a moved trust
+boundary, not a hardened one.
+
+### If publishers report intermittent 429s, raise the limits
+
+Rate limiting keys on a **truncated** source address — IPv4 to `/24`, IPv6 to
+`/64` — because §6.4 forbids retaining the full one. A `/24` sounds like 256
+hosts, and behind carrier-grade NAT it can be thousands of subscribers sharing
+one key.
+
+So a 429 on publish is more likely to mean "a lot of honest servers share one
+carrier" than "somebody is flooding us". §5.2 response bodies carry no
+diagnostic detail, so it reaches the operator of the *publishing* server as a
+directory that intermittently refuses them for no visible reason — the least
+diagnosable failure this service can produce.
+
+The defaults sit far above honest use: at roughly ten publishes per server per
+day, 600 per hour is about six thousand honest servers behind one key. If you
+see 429s on publish anyway, **raise `-rate-put` rather than assume abuse.**
+Proof of work (§6.1) is the primary defence against flooding regardless of what
+the limiter is set to; the limiter is the second line, not the first.
 
 ## What this service will not grow
 

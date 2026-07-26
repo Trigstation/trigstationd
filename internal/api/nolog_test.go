@@ -4,9 +4,11 @@
 package api
 
 import (
+	"bytes"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -143,28 +145,73 @@ func TestNoIdentifierIsFormatted(t *testing.T) {
 	}
 }
 
-// TestNoDirectOutput fails on a write to a process output stream.
+// TestNoDirectOutput fails on a write to a process output stream from anywhere
+// except reportPanic.
 //
 // The handlers have no legitimate reason to write to stdout or stderr, and a
 // stray diagnostic there is request logging by another name. Startup and
 // fatal-error messages belong in main, which serves no requests and so has
 // nothing from one to disclose.
+//
+// reportPanic is the single exception, and it is exempted by name rather than
+// by loosening the rule. A handler panic is a fault in this program: CLAUDE.md
+// forbids identifiers in error output, not error output, and a directory that
+// faults silently is one an operator cannot debug for no privacy gain. Keeping
+// the exemption to one named function means there is one place to review for
+// whether anything request-derived is being emitted — see the doc comment on
+// reportPanic for what is and is not.
+//
+// If a second function ever needs output, that is a decision to be argued for,
+// not a test to be widened quietly.
 func TestNoDirectOutput(t *testing.T) {
+	const allowed = "reportPanic"
+
 	for _, file := range parsePackage(t, false) {
 		ast.Inspect(file.f, func(n ast.Node) bool {
-			sel, ok := n.(*ast.SelectorExpr)
+			fn, ok := n.(*ast.FuncDecl)
 			if !ok {
 				return true
 			}
-			pkg, ok := sel.X.(*ast.Ident)
-			if !ok || pkg.Name != "os" {
-				return true
+			if fn.Name.Name == allowed {
+				return false // exempt, and do not descend into it
 			}
-			if sel.Sel.Name == "Stdout" || sel.Sel.Name == "Stderr" {
-				t.Errorf("%s writes to os.%s: the HTTP layer produces no output", file.name, sel.Sel.Name)
+			ast.Inspect(fn, func(n ast.Node) bool {
+				sel, ok := n.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				pkg, ok := sel.X.(*ast.Ident)
+				if !ok || pkg.Name != "os" {
+					return true
+				}
+				if sel.Sel.Name == "Stdout" || sel.Sel.Name == "Stderr" {
+					t.Errorf("%s: %s writes to os.%s: only %s may produce output",
+						file.name, fn.Name.Name, sel.Sel.Name, allowed)
+				}
+				return true
+			})
+			return false
+		})
+	}
+}
+
+// TestOnlyReportPanicIsExempt asserts the exemption above is not vacuous: the
+// function it names must actually exist. A rename that left the allowlist
+// pointing at nothing would silently make the check total again — which is the
+// safe direction, but it would also mean the panic report had gone, so this
+// fails either way and someone has to look.
+func TestOnlyReportPanicIsExempt(t *testing.T) {
+	found := false
+	for _, file := range parsePackage(t, false) {
+		ast.Inspect(file.f, func(n ast.Node) bool {
+			if fn, ok := n.(*ast.FuncDecl); ok && fn.Name.Name == "reportPanic" {
+				found = true
 			}
 			return true
 		})
+	}
+	if !found {
+		t.Error("reportPanic is exempted by TestNoDirectOutput but does not exist")
 	}
 }
 
@@ -265,4 +312,52 @@ func identifierArg(arg ast.Expr) (string, bool) {
 	})
 
 	return name, found
+}
+
+// TestPanicReportCarriesNoRequestContext runs a panicking handler and inspects
+// what actually reaches stderr.
+//
+// The rule this pins is the one the ruling drew: the fault is reported, the
+// request is not. A stack trace names functions and source lines, which are
+// properties of the binary; an address, a path or a lookup prefix would be
+// properties of whoever happened to be talking to it.
+func TestPanicReportCarriesNoRequestContext(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	saved := os.Stderr
+	os.Stderr = w
+	defer func() { os.Stderr = saved }()
+
+	reportPanic("synthetic fault for TestPanicReportCarriesNoRequestContext")
+
+	w.Close()
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatalf("read pipe: %v", err)
+	}
+	os.Stderr = saved
+	got := buf.String()
+
+	// The fault must be reported: silence here means an undebuggable directory.
+	if !strings.Contains(got, "synthetic fault") {
+		t.Error("the panic value did not reach stderr; a fault that reports nothing cannot be debugged")
+	}
+	if !strings.Contains(got, "goroutine") {
+		t.Error("no stack trace was written")
+	}
+
+	// Nothing that identifies a request may appear. These are the shapes a
+	// regression would take.
+	for _, forbidden := range []string{
+		"192.0.2.", "198.51.100.", "203.0.113.", "127.0.0.1", "::1",
+		"/v1/record", "/v1/signal", "/v1/meta",
+		"prefix=", "bits=", "lookup_id", "channel_id",
+		"X-Forwarded-For", "User-Agent",
+	} {
+		if strings.Contains(got, forbidden) {
+			t.Errorf("the panic report contains %q, which identifies a request", forbidden)
+		}
+	}
 }

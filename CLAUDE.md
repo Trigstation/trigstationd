@@ -190,3 +190,31 @@ Stop and ask. Do not resolve protocol questions by picking something reasonable
 choice is an interoperability failure that surfaces months later.
 
 The known-uncertain areas are listed in `DIRECTORY-SPEC.md` §11.
+
+---
+
+## After a spec amendment: re-audit every package
+
+**Applying a spec patch is not the end of a ruling.** The code that was written
+before the amendment does not implement it, and nothing will tell you.
+
+This is not hypothetical. Eighteen amendments landed during phase 2 after five
+packages had already been written and committed. Three of them — duplicate JSON
+members, leading zeros in `bits`, the draining-instance `429` — were never
+implemented. They were found later, by a task that happened to test across a
+package boundary. A process that catches this by luck is not a process.
+
+So, after applying **any** batch of spec patches, and before continuing with
+feature work:
+
+1. Audit every existing package against every amendment in the batch. Not only
+   the packages that look related — the three that were missed were in
+   `internal/accept`, `internal/query` and `internal/signal`, and each looked
+   like somebody else's problem from the others.
+2. Record the audit in the next report as a table: amendment against package
+   checked, with the outcome. A table with "no change needed" in most cells is
+   the evidence that the audit happened.
+3. Only then resume.
+
+The corollary is that a conformance gap found this way is a process failure
+worth reporting, not just a bug worth fixing.
