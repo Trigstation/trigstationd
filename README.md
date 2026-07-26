@@ -249,6 +249,13 @@ binary, and a copy of the licence. There is no shell in it, no package manager
 and no busybox — the only executable is `trigstationd` itself. It runs as uid
 65532 with a read-only root filesystem and writes only to the database volume.
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Contributions are under the Developer
+Certificate of Origin — sign off with `git commit -s`. Protocol questions belong
+in the [spec repository](https://github.com/trigstation/spec), not here: where
+the code and the specification disagree, the specification is right.
+
 ## Licence and the AGPL network clause
 
 `trigstationd` is licensed **AGPL-3.0-or-later**. See `LICENSE`. The
