@@ -12,6 +12,22 @@
 	admin off
 
 	# ------------------------------------------------------------------
+	# ACME account address. This is the out-of-band expiry warning.
+	# ------------------------------------------------------------------
+	#
+	# Certificate renewal is automatic and silent, and so is its failure.
+	# Whatever an operator does about logs — and §9.2 constrains that heavily —
+	# a renewal can stop working and the first symptom is TLS simply ceasing
+	# to work one day. Let's Encrypt mails an expiry warning to the account
+	# address, and that signal survives every logging decision because it does
+	# not depend on anyone reading a file.
+	#
+	# This is the operator's own address. It is not client data and §9.2 does
+	# not reach it. Change it to yours: an address you do not read is the same
+	# as no address at all.
+	email security@trigstation.com
+
+	# ------------------------------------------------------------------
 	# NO REQUEST LOGGING. Do not delete this block.
 	# ------------------------------------------------------------------
 	#

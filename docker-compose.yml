@@ -13,6 +13,25 @@
 
 services:
   trigstationd:
+    # ------------------------------------------------------------------
+    # FOLLOW-UP, at the first tagged release: replace this build with
+    #
+    #     image: ghcr.io/trigstation/trigstationd:<version>
+    #
+    # and delete the `build:` block.
+    # ------------------------------------------------------------------
+    #
+    # §9 says a directory is deployed by pulling a published image or a
+    # released binary, and that the memory and toolchain needed to compile are
+    # unrelated to those needed to run. Building from context here contradicts
+    # that: it makes the Go toolchain's peak memory into the deployment's
+    # requirement, and an instance sized correctly by §9.1 then fails before
+    # serving a request — as one did, with the OOM killer taking an unrelated
+    # process so that the failure never named memory at all.
+    #
+    # The release workflow already publishes ghcr.io/trigstation/trigstationd
+    # multi-arch on every `v*` tag. This still builds only because no tag
+    # exists yet, and it is the one thing to change when one does.
     build:
       context: .
       dockerfile: Dockerfile
@@ -85,6 +104,37 @@ services:
       # to this directory disappears from it on the next `docker compose up`.
       - records:/data
 
+    # ------------------------------------------------------------------
+    # Bounded logging. §9.2 — and read that section before changing this.
+    # ------------------------------------------------------------------
+    #
+    # Docker's default json-file driver is unbounded: it keeps a container's
+    # stdout and stderr until the container is removed. §9.2 puts container
+    # runtime logs in scope for what they capture, so an unbounded default is
+    # a place client data comes to rest if any layer above ever regresses.
+    #
+    # The answer is a bound, not silence. `driver: none` was tried and is
+    # wrong twice over: it discards certificate renewal failures, so TLS stops
+    # one day with no signal, and — worse — it makes every verification of the
+    # form `docker compose logs | grep ...` succeed vacuously, reporting a
+    # clean result on a deployment that is leaking. A check that cannot fail
+    # is not a check.
+    #
+    # The property is enforced in the components that would emit client data:
+    # the Caddyfile's `exclude`, and the absence of logging code in
+    # trigstationd. A log driver cannot tell a certificate error from a
+    # request, which is why it is the wrong layer to enforce it at and the
+    # right layer to bound.
+    #
+    # 1 MB across 3 files is deliberately small. What survives is startup,
+    # certificate and shutdown events, a few hundred bytes each, so this holds
+    # months of them and cannot grow into an archive.
+    logging:
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "3"
+
     # Hardening. None of this is required by the spec; all of it is cheap.
     # The root filesystem is read-only because the only thing the process
     # writes is the database on the volume above, and /tmp is a tmpfs because
@@ -113,6 +163,16 @@ services:
       # The one thing an operator must set. Compose fails loudly here rather
       # than letting Caddy start with an empty site address.
       TRIGSTATION_DOMAIN: "${TRIGSTATION_DOMAIN:?set TRIGSTATION_DOMAIN in .env, e.g. directory.example.com}"
+
+    # Bounded, for the reasons given on the directory above. This is the
+    # service the bound matters most for: Caddy is where certificate issuance
+    # and renewal are reported, and where a §9.2 regression would surface if
+    # the Caddyfile's `exclude` were ever removed.
+    logging:
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "3"
 
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro

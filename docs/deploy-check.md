@@ -7,13 +7,13 @@ Budget an evening. Most of it is DNS propagation and waiting.
 Throughout, `$DOMAIN` is the hostname you are deploying, e.g.
 `dir.trigstation.com`.
 
-**Read §4 before you begin.** The sections are otherwise in the order you should
-work through them, but §4b configures the Docker daemon to stop capturing
-container output, and once it has, §2's "watch the certificate" and §5's
-default-route check can no longer be performed at all. Both read as passing.
-Either do them first, or re-enable capture for one service temporarily using the
-override shown in §4a. This ordering constraint is the single easiest way to
-come away from this document believing you verified something you did not.
+**A note on what "no output" proves.** Several checks below pass when a `grep`
+finds nothing. That is only evidence if the command could have found something.
+Silencing a log source makes every such check succeed while proving nothing, and
+the first deployment of this document did exactly that before catching it. Where
+a check greps captured output, confirm the output is non-empty first, and where
+a check guards something that matters, break the thing deliberately once and
+confirm the check notices. Each such point is marked below.
 
 Sections 0, 1, 4b, 4c and 5 have been executed against a real public instance.
 Sections 2, 3, 4a and 6 depend on a certificate and are corrected from the
@@ -29,14 +29,31 @@ You need:
 - A VPS with a public IPv4 address. §9.1 puts the *running* load at a small
   instance — NZ$10–25/month is the right order — but note that figure is about
   serving traffic, not about building. See the memory note below.
-- **At least 1 GB of RAM, or swap.** `docker compose up` builds the image from
-  source, and the Go toolchain is the memory peak of the whole deployment — far
-  above anything the service does once running. On a 512 MB instance with no
-  swap this fails, and it fails *indirectly*: the kernel's OOM killer takes
-  whichever process is largest at that moment, so what you see is an unrelated
-  package or tool dying rather than an obvious out-of-memory error. Confirm with
-  `dmesg -T | grep -i oom` before believing any other diagnosis. Two gigabytes of
-  swap is enough and costs nothing:
+  There is **no memory requirement beyond what §9.1 implies**, and if you find
+  yourself needing one, you are compiling on the deployment host — see the note
+  immediately below. A directory serves comfortably in well under the smallest
+  instance any provider sells.
+
+- **Deploy a published image; do not build on the host.** §9 is explicit that a
+  directory is deployed by pulling a published image or a released binary, and
+  that the memory and toolchain needed to compile are unrelated to those needed
+  to run. A compose file that builds from context makes the Go toolchain's peak
+  into the deployment's requirement, and a correctly sized instance then fails
+  before it has served a single request.
+
+  It fails *indirectly*, which is what makes it expensive: the kernel's OOM
+  killer takes whichever process is largest at that moment, so what you see is
+  an unrelated package or tool dying — on the first deployment it was `dracut`,
+  leaving a broken initramfs and no mention of memory anywhere. If anything on a
+  small instance behaves inexplicably, check this before believing any other
+  diagnosis:
+
+  ```
+  dmesg -T | grep -i 'out of memory'
+  ```
+
+  If you must build on the host anyway — before the first tagged release there
+  is no published image — give it swap first. Two gigabytes is enough:
 
   ```
   fallocate -l 2G /swapfile && chmod 0600 /swapfile
@@ -265,101 +282,107 @@ records `remote_ip`, `client_ip` and the full request URI — **including the
 lookup prefix**. Disabling the access log does not stop it; they are different
 loggers. The shipped `Caddyfile` excludes both.
 
-Do this step **before** 4b turns off log capture. Once the daemon is not
-capturing container output, this grep returns nothing whether Caddy is silent or
-screaming, and you will have proved nothing at all:
+Provoke the failure that leaks — a 502 while trigstationd is away, which is what
+a rolling restart produces:
 
 ```
-# Temporarily capture Caddy's output, so that "no output" is a real result.
-cat > /tmp/logcheck.yml <<'YML'
-services:
-  caddy:
-    logging:
-      driver: json-file
-YML
-docker compose -f docker-compose.yml -f /tmp/logcheck.yml up -d --force-recreate caddy
-
-# Provoke the failure that leaks: a 502 while trigstationd is away.
 docker compose stop trigstationd
 curl -sk "https://$DOMAIN/v1/record?bits=0" -o /dev/null    # 502
 docker compose start trigstationd
+
+docker compose logs caddy | wc -c
+# expect: non-zero. If this is 0 the next command proves nothing — see §4b.
 
 docker compose logs caddy | grep -icE 'remote_ip|client_ip|"uri"'
 # expect: 0
 ```
 
 **Prove the check can fail before you trust it.** Comment the `exclude` line out
-of the `Caddyfile`'s `log default` block, repeat the three commands above, and
-confirm the same grep now counts more than zero. Restore the line. A silent
-result from a check that cannot speak is the most expensive kind of evidence:
+of the `Caddyfile`'s `log default` block, `docker compose up -d
+--force-recreate caddy`, repeat the three commands above, and confirm the same
+grep now counts more than zero. Then restore the line and recreate again. A
+silent result from a check that cannot speak is the most expensive kind of
+evidence, and this is the one place in the deployment where that mistake is
+invisible.
 
-```
-docker compose -f docker-compose.yml -f /tmp/logcheck.yml down
-rm /tmp/logcheck.yml
-```
+### 4b. The container runtime — bounded, not silenced
 
-### 4b. The Docker daemon — configure it so nothing persists, then prove it
-
-**This layer is not covered by anything in this repository**, because it is host
-configuration rather than deployment configuration. Docker's default `json-file`
-driver writes every container's stdout and stderr to
+Docker's default `json-file` driver is **unbounded**: it writes every
+container's stdout and stderr to
 `/var/lib/docker/containers/<id>/<id>-json.log` and keeps it until the container
 is removed. If layer 4a ever regresses, that file is where client addresses and
-lookup prefixes come to rest.
+lookup prefixes come to rest, indefinitely.
+
+`docker-compose.yml` now bounds both services at 1 MB across 3 files. Confirm it
+took effect, since a host-level daemon default can be overridden and a
+`daemon.json` you inherited may say something else:
 
 ```
-cat > /etc/docker/daemon.json <<'JSON'
-{
-  "log-driver": "none"
-}
-JSON
-systemctl restart docker
-docker info --format 'Logging Driver: {{.LoggingDriver}}'
-# expect: Logging Driver: none
+docker inspect $(docker compose ps -q caddy) \
+  --format '{{.HostConfig.LogConfig.Type}} {{.HostConfig.LogConfig.Config}}'
+# expect: json-file map[max-file:3 max-size:1m]
+
+du -sh /var/lib/docker/containers/*/*.log | sort -h | tail -3
+# expect: kilobytes, and never growing past the bound
 ```
 
-Then drive real traffic — a publish, a lookup, a malformed request, a signal
-POST and GET — and confirm both that nothing is retrievable and that nothing is
-on disk:
+**Do not set `log-driver: none`.** It was tried on the first deployment and is
+wrong twice over. It discards certificate renewal failures, so TLS stops one day
+with no signal and nothing anywhere records why. And it makes every check of the
+form `docker compose logs … | grep …` succeed **vacuously** — including the one
+in 4a above and the default-route check in §5 — reporting a clean result on a
+deployment that is leaking. §9.2 puts runtime logs in scope *for what they
+capture*; the enforcement belongs in the components that emit, which is 4a, not
+in a driver that cannot tell a certificate error from a request.
+
+Now drive real traffic — a publish, a lookup, a malformed request, a
+rate-limited request, a signal POST and GET — and search what was captured:
 
 ```
-docker compose logs 2>/dev/null | wc -c
+docker compose logs | wc -c                       # a few hundred bytes, not zero
+docker compose logs | grep -icE 'remote_ip|client_ip|"uri"|deadbeef|203\.0\.113'
 # expect: 0
-#   note: stderr carries "configured logging driver does not support reading".
-#   Redirect it away or you will measure the refusal instead of the content.
 
-find /var/lib/docker/containers -name '*-json.log' | wc -l
-# expect: 0
+grep -rlic 'deadbeef' /var/lib/docker/containers/*/*.log
+# expect: 0 matches in every file
 ```
 
-**Consequence to accept deliberately, not discover later:** with this driver
-`docker compose logs` is empty for every service, forever. §2's "watch the
-certificate" and §5's default-route check both depend on reading container
-output, so do those *before* setting this, or re-enable capture for one service
-temporarily using the `/tmp/logcheck.yml` override shown in 4a. Any instruction
-anywhere that reads `docker compose logs … | grep …` and expects no output is
-**vacuously true** on a correctly configured host and proves nothing.
+A non-zero byte count with a zero match count is the result you want. Zero bytes
+would mean the check could not have failed.
 
 ### 4c. The host journal — the layer nobody remembers
 
 Two things write client addresses here, and neither is Docker.
 
-**The firewall.** `ufw` logs blocked packets with their source address, at `low`
-by default, into a journal that on most distributions is persistent. Scanners
-are the bulk of it, but the mechanism does not discriminate: a real client's
-out-of-state packet — a late retransmission, a RST after the connection tracker
-has forgotten the flow — is dropped and its address written to disk. That is a
-client address recorded by a component the operator placed in the path, which is
-exactly what §9.2 forbids:
+**The firewall — a required step, not a judgement call.** `ufw` logs blocked
+packets with their source address, at `low` by default, into a journal that on
+most distributions is persistent. Scanners are the bulk of it, but the mechanism
+does not discriminate: a real client's out-of-state packet — a late
+retransmission, a RST after the connection tracker has forgotten the flow — is
+dropped and its address written to disk.
+
+§9.2 settles this rather than leaving it to the operator. A dropped-packet log
+associates a client address with the time it tried to reach the service, and
+rejection does not make the source less identifying, so it is a record in scope.
+Directory operators SHOULD disable connection logging and accept the reduced
+attack visibility, which the specification considers a cost worth paying. **Do
+this on every deployment**, not only when a check catches it:
 
 ```
-journalctl -k --since '1 hour ago' | grep -c 'UFW BLOCK'
+journalctl -k --since '1 hour ago' | grep -c 'UFW BLOCK'   # before: typically dozens within the hour
 ufw logging off
-nft list ruleset | grep -c LOG        # expect: 0 — it now cannot log, rather than happens not to
+nft list ruleset | grep -c LOG
+# expect: 0 — the ruleset now cannot log, rather than happening not to
 ```
 
-Losing firewall logs is a real cost. §9.2 is a stronger claim than the
-visibility it buys, so it goes; note the trade rather than making it silently.
+Then purge what was recorded before you turned it off, or the deployment
+carries an archive of client addresses it has just promised not to keep:
+
+```
+journalctl --rotate && journalctl --vacuum-time=1s
+```
+
+Verify with a **fixed** cursor, never a relative window — see below.
 
 **Everything else.** Check the whole journal, not just Docker's unit — a log
 shipper, `rsyslog`, or an agent the provider installed will not be under
@@ -449,16 +472,29 @@ This is the check nothing else covers: real DNS, a real certificate, a real
 client, and the whole path end to end. Everything before this point tested the
 instance against itself.
 
-You need a real client to do this, and **this repository does not contain one** —
-`cmd/` holds only the two vector generators, which are build-time tools. A
-publish requires an epoch-derived `LookupID`, a signed envelope and a 20-bit
-proof of work, so it cannot be improvised with `curl`. Either point a real media
-server at the instance, or write a small publisher against `internal/derive`,
-`internal/record` and `internal/pow`. Budget for that before starting this
-section rather than discovering it here.
+A publish requires an epoch-derived `LookupID`, a signed inner payload, a sealed
+ciphertext and a 20-bit proof of work, so it cannot be improvised with `curl`.
+Use `cmd/trigpub`, which does exactly one publish and reports the status:
 
-1. Point a media server's Trigstation configuration at `https://$DOMAIN`.
-2. Let it publish. On the instance:
+```
+go run ./cmd/trigpub \
+  -url https://$DOMAIN \
+  -endpoint wan4:203.0.113.7:8920 \
+  -o published-envelope.json
+```
+
+With no `-s-dir` or `-ik` it generates both, prints them, and publishes under
+them — which is what you want against a new instance. **Keep what it prints**:
+`s_dir` is needed to derive the `RecordKey` that decrypts the record, and
+`ik_pub` to verify the inner signature. It writes the envelope to `-o` *before*
+sending it, so those are the bytes to compare against in step 4 whatever the
+directory answers.
+
+1. Publish, either with `trigpub` or by pointing a real media server at
+   `https://$DOMAIN`. Expect `status 204` — §5.2 makes `204` the sole success
+   code, and a publish that replaces an existing record is not distinguished
+   from one that creates it.
+2. On the instance:
 
    ```
    curl -s https://$DOMAIN/v1/meta | jq .record_count
@@ -512,13 +548,28 @@ section rather than discovering it here.
    The sharper test is a field the directory does not know. §10 requires unknown
    fields to be ignored and preserved, and a directory that decodes into a typed
    structure and re-encodes will silently drop them while looking entirely
-   healthy. Publish an envelope carrying an extra member, then confirm it comes
-   back:
+   healthy.
+
+   Build an envelope without publishing it — point `trigpub` at a dead port, so
+   it writes the file and then fails at the `PUT` — add a member, and send that:
 
    ```
+   go run ./cmd/trigpub -url http://127.0.0.1:1 \
+     -endpoint wan4:203.0.113.7:8920 -o probe.json      # exits non-zero, as intended
+   jq -c '. + {"x-unknown-probe":"survives"}' probe.json > probe-sent.json
+   curl -s -o /dev/null -w '%{http_code}\n' -X PUT \
+     -H 'Content-Type: application/json' --data-binary @probe-sent.json \
+     "https://$DOMAIN/v1/record"
+   # expect: 204 — an unknown member is ignored, never rejected (§10)
+
    curl -s "https://$DOMAIN/v1/record?bits=0" | grep -c 'x-unknown-probe'
    # expect: 1 — if 0, the directory is re-serialising. See §5.2 on json.RawMessage.
    ```
+
+   It must be an envelope that has never been published: adding a member to one
+   already stored changes nothing about its `lookup_id` or `expires_at`, so the
+   recency rule answers `409` and the probe is never stored at all. That is
+   correct behaviour reading as a failed test.
 
    They must be identical, byte for byte, including whitespace and member order.
    §5.2 requires verbatim storage and §10's additive-change policy depends on it:
