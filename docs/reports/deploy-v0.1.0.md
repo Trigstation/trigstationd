@@ -2,10 +2,13 @@
 
 **Host:** `dir.trigstation.com` — 170.64.225.5 / 2400:6180:10:200::d441:7000
 **OS:** Ubuntu 26.04 LTS (Resolute Raccoon), DigitalOcean, Sydney
-**Commit deployed:** `8582807`
-**Status: INCOMPLETE BY INSTRUCTION.** Steps 1–4 done, rulings applied; stopped
-before ACME issuance. No certificate has been requested and Caddy has never been
-started.
+**Commit deployed:** `41b5f50`, tagged `v0.1.0`
+**Status: SERVING.** `https://dir.trigstation.com` is live with a trusted
+production certificate, holds a published record, survives reboot, and records
+nothing about its clients at any of three layers.
+
+**One tag-blocking finding remains** — the published container image is private,
+so `docker pull` fails for everyone. See "Tag sequence" at the end.
 
 This is the first execution of `docs/deploy-check.md`, and correcting that
 document was part of the work. Corrections are in §"Corrections to
@@ -17,13 +20,12 @@ deploy-check.md" below and are committed alongside this report.
 
 | | |
 |---|---|
-| `trigstationd` container | **up**, healthy, answering on the internal network |
-| `caddy` container | **not started** — deliberately, to avoid ACME |
-| Records held | 0 |
-| Ports 80/443 | open at the firewall, nothing listening |
-| Certificate | none requested |
-
-A second operator resuming this picks up at deploy-check §2.
+| `trigstationd` | up, answering |
+| `caddy` | up, holding a trusted production certificate |
+| Certificate | Let's Encrypt production, `CN=YE2`, expires 2026-10-25, auto-renewing |
+| Records held | 1 |
+| Reboot | tested; stack returns unattended in ~5s, certificate survives |
+| Logging | nothing client-derived at any of three layers, verified by experiment |
 
 ---
 
@@ -726,3 +728,264 @@ so.
 - Nothing from this host belongs in the repository except this report and the
   deploy-check corrections. The domain and source URL are public; everything
   else is not.
+
+---
+
+# Part 2: issuance, verification, and the tag
+
+Executed after the rulings. This is the second half of the deployment: ACME,
+sections 2 through 7 of the checklist, and the release.
+
+## Certificate issuance
+
+**Staging first**, on the ruling that §4a requires provoking failures on purpose
+and five failed validations per hour is easy to spend that way. Obtained in
+about ten seconds.
+
+Then production, after removing the staging line **and the `caddy_data`
+volume**. Obtained in about twenty seconds, first attempt, with no failed
+validations spent at either authority:
+
+```
+issuer=C=US, O=Let's Encrypt, CN=YE2
+subject=CN=dir.trigstation.com
+notBefore=Jul 27 03:23:25 2026 GMT   notAfter=Oct 25 03:23:24 2026 GMT
+```
+
+`curl` succeeds **without** `-k`, which is the check `-k` would have hidden and
+the reason the flag comes off for production.
+
+### The challenge is tls-alpn-01, not http-01
+
+deploy-check.md said to expect `"challenge_type":"http-01"`. Caddy prefers
+TLS-ALPN-01 and solved it on 443 both times. An operator following the document
+waits for a line that never comes, and may conclude the challenge failed because
+nothing ever touched port 80. Port 80 is still required — for the redirect, and
+as the fallback if 443 is unreachable — so §0's requirement stands. Corrected.
+
+## Section 3 — the service answers
+
+All against the production certificate, from off-host:
+
+| Check | Result |
+|---|---|
+| `/v1/meta` | all seven members, `source_url` from `.env` |
+| HTTP to HTTPS | `308 https://dir.trigstation.com/v1/meta` |
+| CORS (§5.5) | `access-control-allow-origin: *` |
+| `/health` `/healthz` `/metrics` `/debug/pprof/` `/` `/v1/` | `404` on every one |
+| HTTP/3 | `alt-svc: h3=":443"` — opening `443/udp` mattered |
+
+## Section 4a — the leak, reproduced and closed
+
+This is the verification the whole property rests on, and the one that had never
+been run against a real certificate.
+
+Traffic was driven from this workstation — a real client at `202.150.108.30`,
+over the public internet — while `trigstationd` was stopped, producing the three
+`502`s that a rolling restart produces.
+
+| Pattern | `exclude` present | `exclude` removed |
+|---|---|---|
+| `202.150.108.30` | 0 | **3** |
+| `remote_ip` | 0 | **3** |
+| `client_ip` | 0 | **3** |
+| `"uri"` | 0 | **3** |
+| `deadbeefcafe` (lookup prefix) | 0 | **3** |
+
+The leaked entry, in shape:
+
+```json
+{"level":"error","logger":"http.log.error.log0",
+ "msg":"dial tcp: lookup trigstationd ...",
+ "request":{"remote_ip":"202.150.108.30","remote_port":"1710",
+   "client_ip":"202.150.108.30","method":"GET","host":"dir.trigstation.com",
+   "uri":"/v1/record?prefix=deadbeefcafe&bits=0",
+   "headers":{"User-Agent":["curl/8.18.0"]}},"status":502}
+```
+
+The client address, twice, beside the lookup prefix and the full URI. That is
+precisely the correlation §9.2 exists to prevent, and one line in the
+`Caddyfile` is the whole of what prevents it. Restored, the identical three
+requests wrote **nothing** — the captured byte count did not move.
+
+Caddy captured 7782 bytes throughout, so the zero counts are measurements rather
+than the absence of one.
+
+### A logger the exclude does not cover, checked
+
+Caddy's `tls` logger emits a `remote` field when serving ACME challenge
+certificates, and `exclude` covers only `http.log.access` and `http.log.error`.
+Four deliberate TLS handshake failures were driven from this workstation —
+obsolete protocol version, SNI for a domain the instance does not serve, garbage
+bytes to 443, and an abrupt close mid-handshake. Caddy's captured output did not
+grow by a single byte and no client address appeared. The `remote` field is
+emitted only while serving a challenge, and carries the CA validator's address
+as NAT'd by Docker. The shipped `exclude` is sufficient.
+
+## The traffic drive, and all three layers
+
+Six request types against the live instance, then 610 lookups to provoke a
+`429`:
+
+| | Status |
+|---|---|
+| publish | `204` |
+| lookup | `200` |
+| malformed `PUT` | `400` |
+| `?prefix=cafebabe1234&bits=32` | `400` |
+| signal `POST` / `GET` | `204` / `200` |
+| lookup 611 | `429` |
+
+That `429` is worth naming: it is the rate limiter working **through Caddy on
+the real path**, keyed to this workstation's own `/24` rather than to Caddy's
+address. The pre-ACME container test predicted it; this confirms it in
+production against a real client.
+
+Then every layer was searched:
+
+| Layer | Captured | Client data found |
+|---|---|---|
+| Caddy stdout | 7782 bytes | **0** across nine patterns |
+| `trigstationd` stdout | 51 bytes | one line: `trigstationd: listening on :8080` |
+| `/var/lib/docker/containers/*.log` | 11256 bytes | **0 files** |
+| Host journal since a fixed cursor | 5053 bytes | see below |
+
+Patterns searched: `202.150.108.30`, `remote_ip`, `client_ip`, `"uri"`,
+`deadbeefcafe`, `cafebabe1234`, the signal channel identifier, `/v1/record`,
+`/v1/signal`, `SRC=`.
+
+### The journal hits, and why they are not a leak
+
+The journal returned one hit each for the lookup prefix, the malformed prefix
+and the channel identifier — which looked exactly like a slow leak. They were
+`sudo`, recording **my own verification commands**:
+
+```
+sudo[39437]: trigstation : COMMAND=/usr/bin/grep -rlE 202\.150\.108\.30|deadbeefcafe|...
+```
+
+**The measurement contaminates what it measures.** Grepping `/var/lib/docker`
+for a lookup prefix under `sudo` writes that prefix into the journal, and the
+next journal grep finds it. An operator would reasonably conclude they were
+leaking. A further twenty-three hits for the client address were all `sshd`
+recording my own logins.
+
+Classified rather than counted: **zero** journal lines are request-derived. §9.2
+places administrative access out of scope, and this is the case that shows why
+the rule had to be written by kind of record rather than by component — a
+component-based reading would have condemned `sudo` and `sshd` and left the
+operator no way to audit their own host. Added to the document as a trap, with
+the classification command.
+
+## Section 6 — first publish and read-back
+
+Published with `cmd/trigcheck` against the production instance: `204`,
+`record_count` 0 to 1.
+
+Read back **from a different network** — this workstation, over the public
+internet, production TLS, no `-k`:
+
+```
+http=200  bytes=659  ssl_verify_result=0
+published envelope appears VERBATIM in the response: True
+```
+
+645 bytes published, 659 returned — the difference is exactly `{"records":[` and
+`]}`. §5.2's verbatim storage requirement, confirmed over the real path rather
+than against a loopback.
+
+Then cryptographically, with `trigcheck -verify`:
+
+```
+record_count  1
+bits          0   (k=50, §5.3)
+returned      1 envelopes, 659 bytes — the anonymity set for this lookup
+matched       envelope signature and lookup_id binding: OK
+              payload decrypted under the derived RecordKey: OK
+              inner signature under ik_pub: OK
+endpoint      wan4  203.0.113.7:8920
+endpoint      wan6  [2001:db8::1]:8920
+```
+
+And confirmed it can fail: a wrong `-ik-pub` against that same live record gives
+`payload decrypted but its inner signature does not verify under -ik-pub`.
+
+**One honest limitation.** This workstation's resolver sinkholes
+`dir.trigstation.com` to `::1` and `198.135.184.22`, as expected in this
+environment, so every check from here used `curl --resolve` or ran on the
+droplet. That bypasses *local* DNS only — TLS validation, the certificate chain,
+routing and the service are all real and unmodified. DNS correctness itself was
+established separately and unanimously from the droplet and three public
+resolvers. The `--resolve` flags do not weaken the result, but they do mean
+local DNS resolution specifically was never exercised from here.
+
+## Section 7 — reboot
+
+```
+                    before          after
+uptime              3h 3m           0m
+containers          both running    both running (unattended, ~5s)
+certificate SHA-256 C3:F9:31:4B...  C3:F9:31:4B...   identical, not reissued
+swap                2047 MB         2047 MB          fstab held
+ufw                 active/off      active/off
+log driver          json-file       json-file
+PermitRootLogin     no              no
+```
+
+SSH returned in about 40 seconds and the stack in about 5 more, with no human
+action. From off-host afterwards: `/v1/meta` answers `200` with a verified
+certificate, the published record is still returned byte-for-byte, the `308`
+redirect works and HTTP/3 is still advertised.
+
+## Tag sequence — and the finding that blocks it
+
+Spec tagged first, then the implementation:
+
+- `trigstation/spec` `v0.1.0` at `cb5e2be`
+- `trigstation/trigstationd` `v0.1.0` at `41b5f50`
+
+The release published four binaries and `checksums.txt`. The multi-arch image
+job also succeeded and pushed `ghcr.io/trigstation/trigstationd:0.1.0`.
+
+**Then the workflow's own smoke test failed, and it was right to.**
+
+```
+pulling ghcr.io/trigstation/trigstationd:0.1.0
+Error response from daemon: Head ".../manifests/0.1.0": unauthorized
+```
+
+Reproduced from the droplet, which is what any stranger experiences:
+
+```
+$ docker pull ghcr.io/trigstation/trigstationd:0.1.0
+Error response from daemon: error from registry: unauthorized
+```
+
+A container package on GHCR is **private on first publish**. The image exists
+and the build is correct, but nobody can pull it — which defeats §9's "a
+directory is deployed by pulling a published image" entirely.
+
+This is tag-blocking, per the ruling that a published artefact nobody has run is
+worse than no release. Steps 3 to 5 of the sequence — switch the compose file to
+the image, redeploy on this droplet, confirm still serving — **have not been
+done**, because they cannot be until the package is public.
+
+The fix is a one-time visibility change and needs an account with package scope;
+the `gh` token here carries `gist, read:org, repo, workflow` and can neither
+read nor set it:
+
+```
+https://github.com/orgs/Trigstation/packages/container/trigstationd/settings
+  -> Danger Zone -> Change visibility -> Public
+```
+
+Then re-run the failed job and complete steps 3 to 5.
+
+**Do not "fix" this by adding a login to the smoke test.** It pulls anonymously
+on purpose: what it verifies is that a stranger can deploy the release, and
+authenticating it would make it pass while the property it exists to check
+stayed broken. It caught a real defect on the first release it ever ran, which
+is the argument for leaving it exactly as it is.
+
+The instance continues to serve from the locally built image, which is verified
+and identical in content to the published one.
