@@ -176,11 +176,19 @@ docker compose logs -f caddy
 **Expected**, within a minute or so:
 
 ```
-{"level":"info","logger":"tls.obtain","msg":"acquiring lock","identifier":"$DOMAIN"}
-{"level":"info","logger":"tls.issuance.acme","msg":"waiting on internal rate limiter",...}
-{"level":"info","logger":"tls.issuance.acme.acme_client","msg":"trying to solve challenge","challenge_type":"http-01"...}
+{"level":"info","logger":"http","msg":"waiting on internal rate limiter","identifiers":["$DOMAIN"]}
+{"level":"info","logger":"http.acme_client","msg":"trying to solve challenge","identifier":"$DOMAIN","challenge_type":"tls-alpn-01"}
+{"level":"info","logger":"tls","msg":"served key authentication certificate","challenge":"tls-alpn-01"}
+{"level":"info","logger":"http.acme_client","msg":"authorization finalized","authz_status":"valid"}
 {"level":"info","logger":"tls.obtain","msg":"certificate obtained successfully","identifier":"$DOMAIN"}
 ```
+
+**The challenge is `tls-alpn-01`, not `http-01`.** Caddy prefers TLS-ALPN-01 and
+solves it on 443 whenever it can; HTTP-01 on port 80 is the fallback. Port 80 is
+still needed — for the HTTP-to-HTTPS redirect, and for the fallback if 443 is
+unreachable — so the requirement in §0 stands, but do not wait for an `http-01`
+line that will never come, and do not conclude the challenge failed because
+nothing touched port 80.
 
 ### Failure modes, in the order you are likely to hit them
 
@@ -190,21 +198,73 @@ docker compose logs -f caddy
 | `timeout during connect` on the challenge | Port 80 blocked upstream | Open it at the provider's firewall, not just the host's |
 | `connection refused` on the challenge | Something else already bound to 80/443 | `ss -lntp \| grep -E ':(80\|443)'` and stop it |
 | `urn:ietf:params:acme:error:rateLimited` | Too many failed attempts | **Stop.** See below |
-| Certificate obtained but browser warns | You tested earlier with `localhost` | `docker compose down -v` to clear `caddy_data`, then up again |
+| Certificate obtained but browser warns | Still on the staging CA, or a stale account in `caddy_data` | Remove the volume, not just the container — see below |
 
-**On rate limiting:** Let's Encrypt allows five failed validations per account,
-per hostname, per hour. It is easy to burn through that by restarting while DNS
-is still wrong. If you hit it, fix the underlying problem and wait the hour —
-restarting faster makes it worse. To iterate without spending attempts, point
-Caddy at the staging CA first by adding to the global block of the `Caddyfile`:
+### Issue against staging first. This is a step, not an optimisation.
+
+Let's Encrypt allows five failed validations per account, per hostname, per
+hour. That is easy to exhaust by accident while DNS settles — and easy to
+exhaust *on purpose*, because §4a below requires provoking a failure and
+restarting repeatedly to prove its check can fail. Exhausting it means waiting
+an hour rather than finishing tonight, and the risk is asymmetric: staging costs
+one extra teardown, the alternative costs an evening.
+
+Add to the global block of the `Caddyfile`:
 
 ```
 acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
 ```
 
-Staging issues untrusted certificates with far higher limits. **Remove that line
-and clear the certificate volume before going live**, or you will serve a
-certificate no client accepts.
+Staging issues from a root nothing trusts, with far higher limits. Work through
+§3, §4 and §5 against it, then switch to production for §6.
+
+**Staging certificates are untrusted, so staging checks need `-k`.** `curl`
+and every browser reject them, and that is the certificate working as intended
+rather than a fault. Every `curl` in §3 and §4 needs `-k` while you are on
+staging.
+
+**Take `-k` off again for production.** Carrying the flag over is the expensive
+mistake: `-k` suppresses exactly the trust failure that production issuance
+exists to demonstrate, so a misissued or wrongly-chained production certificate
+passes every check silently. The point of §3 against production is that it
+succeeds *without* `-k`.
+
+### Switching to production — remove the volume, not just the container
+
+```
+# 1. remove the staging line from the Caddyfile
+# 2. then, and this is the part that catches people:
+docker compose down
+docker volume rm trigstationd_caddy_data
+docker compose up -d
+```
+
+**Deleting the container is not enough.** Caddy caches the ACME account key and
+the issued certificate in the `caddy_data` volume, and that volume outlives
+`docker compose down`. A leftover staging account keeps the instance pointed at
+staging after the configuration says otherwise, and the symptom is the
+confusing one: issuance *succeeds*, the logs look correct, and the certificate
+is still untrusted. If a production certificate comes back untrusted and the
+`Caddyfile` is right, this is why.
+
+Confirm which authority actually issued it, rather than trusting that the
+config changed:
+
+```
+echo | openssl s_client -connect $DOMAIN:443 -servername $DOMAIN 2>/dev/null \
+  | openssl x509 -noout -issuer
+```
+
+Staging intermediates carry a literal `(STAGING)` in the common name — the
+adjective-fruit names rotate, so match on that marker rather than on any
+particular one:
+
+```
+issuer=C=US, O=Let's Encrypt, CN=(STAGING) Baloney Bulgur YE2   <- staging
+issuer=C=US, O=Let's Encrypt, CN=YE2                            <- production
+```
+
+The definitive check is simply that `curl` succeeds **without** `-k`.
 
 **On `docker compose down -v`:** both places above reach for it, and on a first
 deployment it is harmless because there is nothing yet to lose. It is worth
@@ -397,8 +457,34 @@ journalctl --since "$MARK" | grep -icE 'deadbeef|/v1/record|SRC='
 # expect: 0
 ```
 
-Report what you searched for and the byte counts you got. "No logging found" is
-not a result; it is the absence of one.
+**The measurement contaminates what it measures, and it will alarm you.** `sudo`
+writes the command it ran to the journal, so the moment you run
+
+```
+sudo grep -r 'deadbeefcafe' /var/lib/docker/containers/
+```
+
+the string `deadbeefcafe` is *in the journal* — placed there by your own audit
+trail, not by the service. The next journal grep then finds exactly one hit per
+search you performed, which looks precisely like a slow leak. Two ways out, and
+the first is better:
+
+```
+# classify the hits rather than counting them
+journalctl --since "$MARK" | grep 'deadbeefcafe' | grep -vcE 'sudo|sshd|session'
+# expect: 0 — every remaining hit is your own administrative access
+```
+
+Administrative access is out of scope by §9.2's rule: `sudo` and `sshd` record
+the operator's own commands and logins, not a directory client's request. A
+count that does not separate the two is not a measurement. Expect `sshd` to
+contribute a dozen or more lines carrying **your** address for the same reason,
+and do not mistake them for client records.
+
+Report what you searched for, the byte counts captured at each layer, and how
+many hits you classified away. "No logging found" is not a result; it is the
+absence of one — and a zero from a layer that captured zero bytes is worth
+nothing at all.
 
 ---
 
