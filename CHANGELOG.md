@@ -23,10 +23,12 @@ Two conventions worth keeping:
 
 ## [Unreleased]
 
+## [0.1.0] — 2026-07-27
+
 ### Added
 
-Everything. This is the first release; the entries below are what a v0.1.0 tag
-will contain rather than a record of change from a previous version.
+Everything. This is the first release; the entries below are what it contains
+rather than a record of change from a previous version.
 
 - The four operations of `DIRECTORY-SPEC.md` §5: `GET /v1/meta`,
   `PUT /v1/record`, `GET /v1/record`, and `POST`/`GET /v1/signal/{channel_id}`.
@@ -46,6 +48,12 @@ will contain rather than a record of change from a previous version.
   normative evaluation orders, and verbatim storage. Both sets are generated and
   self-checking.
 - A Dockerfile, a compose stack with Caddy, and `docs/deploy-check.md`.
+- `cmd/trigcheck`, which publishes one record and reads it back. A directory
+  should be checkable on its own: requiring a client library to confirm a round
+  trip means no directory can be verified until one exists in the operator's
+  language. It is a conformance check rather than a client — no epoch fallback
+  window, no racing endpoints, no connecting to what it finds, no persisted
+  state.
 
 ### Security
 
@@ -60,4 +68,16 @@ will contain rather than a record of change from a previous version.
   `client_ip` and the full request URI — which carries a lookup prefix — on any
   per-request failure. Disabling the access log does not affect it.
 
+  Confirmed by experiment on a public instance rather than by reading: with the
+  `exclude` line removed, three `502`s during a rolling restart wrote the
+  client's address, the full URI and the lookup prefix three times over.
+  Restored, the same three requests wrote nothing. §9.2 and `DECISIONS.md` I-8.
+- Container output is captured under a **bounded** driver, 1 MB across 3 files,
+  rather than silenced. Silencing satisfies §9.2's letter and defeats it: it
+  discards certificate renewal failures, so TLS stops one day with no signal,
+  and it makes every `docker compose logs | grep` verification succeed
+  vacuously. Enforcement belongs in the components that emit client data, not in
+  a driver that cannot tell a certificate error from a request.
+
 [Unreleased]: https://github.com/trigstation/trigstationd/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/trigstation/trigstationd/releases/tag/v0.1.0
