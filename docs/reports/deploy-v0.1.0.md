@@ -3,8 +3,9 @@
 **Host:** `dir.trigstation.com` — 170.64.225.5 / 2400:6180:10:200::d441:7000
 **OS:** Ubuntu 26.04 LTS (Resolute Raccoon), DigitalOcean, Sydney
 **Commit deployed:** `8582807`
-**Status: INCOMPLETE BY INSTRUCTION.** Steps 1–4 done; stopped before ACME
-issuance. No certificate has been requested and Caddy has never been started.
+**Status: INCOMPLETE BY INSTRUCTION.** Steps 1–4 done, rulings applied; stopped
+before ACME issuance. No certificate has been requested and Caddy has never been
+started.
 
 This is the first execution of `docs/deploy-check.md`, and correcting that
 document was part of the work. Corrections are in §"Corrections to
@@ -341,12 +342,183 @@ rather than done silently.
   Needs TLS.
 - The full traffic drive: publish, lookup, malformed, rate-limited, signal
   POST and GET, then grep all three layers.
-- **Purging the ~75 historical `SRC=` journal entries** recorded before ufw
-  logging was disabled. Deliberately deferred: the journal is still needed for
-  step 6's verification. `journalctl --rotate --vacuum-time=1s` afterwards.
-- `sshd` logs administrator source addresses on every login. Judged out of
-  scope for §9.2, which concerns directory clients, but it is a client address
-  on disk and the operator should know it is there.
+
+---
+
+## Rulings applied
+
+The questions above were answered, the specification amended, and the
+deployment brought into line. Spec commit `6d2a5c7`, implementation `31315da`.
+
+### §9.2 now scopes a kind of record, not a kind of component
+
+All three of the reported ambiguities were one question asked three times, and
+the axis was wrong. §9.2 listed components in the request path, which invites an
+operator to ask whether some component is covered — a question with no stable
+answer. It now says a record is in scope when it links a client to a request,
+and out of scope when it records the operator's own configuration, the host's
+own operation, or administrative access. Three cases are stated as examples:
+firewall logs in scope, `sshd` out, container runtime logs in scope only for
+what they capture. Recorded as `I-8`.
+
+`sshd` logging administrator addresses is therefore settled and needs no action.
+
+### The log driver was wrong, and was hiding its own wrongness
+
+`log-driver: none` has been replaced with bounded `json-file`, 1 MB across 3
+files, declared in `docker-compose.yml` so it travels with the deployment rather
+than depending on host configuration. The host daemon default was changed to
+match, as defence in depth.
+
+This corrects a real error on my part, and it is worth being precise about which
+part. Silencing the runtime satisfied the letter of §9.2. It also:
+
+- discarded certificate renewal failures, so TLS would have stopped one day with
+  no signal anywhere; and
+- made **every** `docker compose logs … | grep …` check succeed vacuously.
+
+The second is the serious one. Two checks in `deploy-check.md` depended on
+reading container output, and under `none` both reported clean — on a host that
+could have been leaking. I caught this and documented it, but the right response
+was to fix the driver rather than to document the trap. Enforcement belongs in
+the components that emit client data, which is the `Caddyfile`'s `exclude` and
+the absence of logging code in `trigstationd`. A log driver cannot tell a
+certificate error from a request, which is exactly why it is the wrong layer.
+
+Verified after the change:
+
+```
+docker inspect ... --format '{{.HostConfig.LogConfig.Type}} {{.HostConfig.LogConfig.Config}}'
+json-file map[max-file:3 max-size:1m]
+
+docker compose logs trigstationd | wc -c
+51
+trigstationd-1  | trigstationd: listening on :8080
+```
+
+51 bytes and zero matches for `default route` is a real pass. Zero bytes was not.
+
+### Firewall logging is now spec-backed and required
+
+`ufw logging off` is recorded in `deploy-check.md` §4c as a required step with
+§9.2's reasoning, not as something an operator discovers. The historical entries
+have been purged, which the earlier report deferred:
+
+```
+before:  SRC= lines: 77      journal: 16M
+purge:   journalctl --rotate && journalctl --vacuum-time=1s
+         Vacuuming done, freed 4.7M of archived journals
+after:   SRC= lines: 0       UFW BLOCK lines: 0
+```
+
+### An ACME account address
+
+`security@trigstation.com` in the `Caddyfile`'s global block. This is the expiry
+warning that survives every logging decision, because it does not depend on
+anyone reading a file. It is the operator's own address and §9.2 does not reach
+it.
+
+### The memory floor is gone; building on the host is the defect
+
+§9 now says a directory is deployed by pulling a published image or a released
+binary, and that the memory and toolchain needed to compile are unrelated to
+those needed to run. Recorded as `I-9`. `deploy-check.md` no longer states a RAM
+requirement; the swapfile instructions remain, scoped to "if you must build on
+the host anyway", which is true only until the first tag.
+
+**Follow-up, and it is load-bearing:** `docker-compose.yml` still builds from
+context, because `ghcr.io/trigstation/trigstationd` does not exist until `v0.1.0`
+is tagged. The release workflow already publishes it multi-arch on every `v*`
+tag. A comment block at the top of the service records the exact change to make.
+The swapfile stays on this host regardless — it costs nothing and covers other
+surprises — but it is no longer a documented prerequisite.
+
+---
+
+## cmd/trigpub
+
+A supported publishing tool, not a throwaway. It takes `S_dir`, an endpoint
+list and a directory URL, publishes once, and reports the status. No daemon, no
+scheduling. It adds no dependencies and no endpoint, exactly as the vector
+generators add none.
+
+With no `-s-dir` or `-ik` it generates both, prints them, and publishes under
+them — the first-publish case. It writes the envelope to `-o` **before** sending
+it, which is what makes the §5.2 verbatim check possible whatever the directory
+answers, and which also turns out to be how the unknown-field probe is built:
+point it at a dead port and it produces a valid, never-published envelope.
+
+### One implementation error worth recording
+
+The tool initially treated `200` and `201` as success and reported a *successful*
+publish as a failure. §5.2 binds every outcome to exactly one code and success
+is `204` alone — a publish that replaces an existing record is not distinguished
+from one that creates it. The first end-to-end run caught it, which is the
+argument for running the thing rather than reasoning about it.
+
+### Verified against a real directory
+
+Published, looked up, decrypted and compared:
+
+| Check | Result |
+|---|---|
+| Publish | `204 No Content` |
+| Envelope signature and `lookup_id` binding | VERIFIED |
+| Payload decrypts under the derived `RecordKey` | VERIFIED |
+| Inner payload signature under `ik_pub` | VERIFIED |
+| Returned envelope vs. published bytes | **identical** |
+| Replay of the identical envelope | `409` — recency rule holds |
+| Envelope with an unknown member, published | `204` — ignored, not rejected (§10) |
+| That member present in the lookup response | **yes** — stored verbatim |
+
+The last two are the sharp test. A directory that decoded envelopes into a typed
+structure and re-encoded them would drop the unknown member while looking
+entirely healthy, and §10's additive-change policy depends on it not doing so.
+
+Verification used a throwaway program against `internal/derive` and
+`internal/record`, which was deleted afterwards. **`trigpub` publishes but does
+not look up or verify**, so `deploy-check.md` §6's "confirm the envelope
+decrypts and its inner signature verifies" is still not executable with shipped
+tooling alone. See the handback.
+
+---
+
+## Re-audit against the amendments
+
+CLAUDE.md requires every package be audited against every amendment in the
+batch. Neither amendment touches the wire format, so no vectors were
+regenerated and none needed to be. Both `testdata/vectors.json` and
+`testdata/api-vectors.json` still reproduce.
+
+| Package | I-8 (§9.2 scopes records, not components) | I-9 (deploy by published image) |
+|---|---|---|
+| `.` (main) | No change. Writes startup, shutdown and the default-route warning; all operator configuration or host operation, out of scope by the new rule. | No change. |
+| `internal/accept` | No change needed. | No change needed. |
+| `internal/api` | Checked closely. One function may write to an output stream, `reportPanic`, enforced by `TestNoDirectOutput`. A panic message is host operation and out of scope; the existing comment already forbids it carrying request values. Unchanged. | No change needed. |
+| `internal/apivectors` | No change needed. | No change needed. |
+| `internal/b64` | No change needed. | No change needed. |
+| `internal/clientaddr` | No change needed. Its import allowlist already makes an output stream unreachable. | No change needed. |
+| `internal/derive` | No change needed. | No change needed. |
+| `internal/pow` | No change needed. | No change needed. |
+| `internal/query` | No change needed. | No change needed. |
+| `internal/ratelimit` | No change needed. Source checker unaffected. | No change needed. |
+| `internal/record` | No change needed. | No change needed. |
+| `internal/reject` | No change needed. | No change needed. |
+| `internal/signal` | No change needed. | No change needed. |
+| `internal/store` | No change needed. | No change needed. |
+| `internal/vectors` | No change needed. | No change needed. |
+| `cmd/gen-vectors`, `cmd/gen-api-vectors` | No change needed; build-time tools. | No change needed. |
+| `cmd/trigpub` | **New.** It is a client, not a directory, and prints only its own key material to its own terminal. Documented in the package comment so a future reader does not mistake it for a violation. | Consistent: it is a client and is not deployed. |
+| `docker-compose.yml` | **Changed.** Bounded `json-file` on both services. | **Follow-up recorded**, not yet actionable — no published image until `v0.1.0`. |
+| `Caddyfile` | **Changed.** ACME account address added. `exclude` untouched. | No change needed. |
+
+A table reading "no change needed" in most cells is the evidence the audit
+happened. The two cells that are not are `internal/api`, where the new wording
+required a judgement that the existing design had already anticipated, and
+`cmd/trigpub`, which is new and is a client rather than a deployment.
+
+Gates re-run after all changes: `gofmt` clean, `go vet` clean, no logging
+imports anywhere in the tree, licence headers present, full test suite passing.
 
 ---
 
@@ -453,8 +625,9 @@ so.
 - SSH as `trigstation`, key `trigstation_dev`. Root login is off.
 - Repo at `/opt/trigstationd`, owned by `trigstation`, tree clean. `.env` is
   local and gitignored — do not commit it.
-- `docker compose logs` returns **nothing, by design**. This is the first thing
-  that will confuse you. See deploy-check §4b for the temporary override.
+- `docker compose logs` works and is bounded at 1 MB across 3 files. Do **not**
+  set `log-driver: none`; see the rulings section for why it was tried and
+  reverted.
 - Swap is load-bearing. Do not remove it. If the box starts behaving strangely
   during a build, check `dmesg -T | grep -i oom` before anything else.
 - `reload` sshd, never `restart` — see §2 above.
