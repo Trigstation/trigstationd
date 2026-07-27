@@ -23,12 +23,55 @@ Two conventions worth keeping:
 
 ## [Unreleased]
 
+## [0.1.2] — 2026-07-27
+
+**The final release.** No code changed between `0.1.1` and this — the binaries
+and the image are built from identical sources. What changed is that following
+`docs/deploy-check.md` now works.
+
+### Fixed
+
+- `docker-compose.yml` pulls the published image instead of building from
+  context. In `0.1.1` it still built, while §1 of `deploy-check.md` told a
+  reader to clone the tag — so anyone following the document got a compose file
+  that compiles Go on the deployment host, and on a small instance hit exactly
+  the out-of-memory failure the document exists to prevent. That is the worst
+  shape a bug can take in an archived project: it fails for the next person in
+  the precise way the documentation promises it will not, and nobody is left to
+  answer the issue.
+
+### Verified
+
+Both released artefacts were confirmed against each other over the public
+internet, on a live host, with no credentials of any kind:
+
+- **The image was pulled and run unmodified, and came up on the first attempt
+  with no intervention.** Onto a host that had never held it and had no
+  registry credentials, so the pull was anonymous exactly as a stranger's would
+  be. It then served `dir.trigstation.com` under a production Let's Encrypt
+  certificate: `/v1/meta` answering `200` with a verified chain, the `308`
+  redirect intact, HTTP/3 advertised, and a record published before the swap
+  returned byte-for-byte afterwards.
+- **The released `trigcheck` binary was downloaded, checksum-verified and run
+  against that instance**, following §6 of `deploy-check.md` as written. It
+  decrypted the record under the derived `RecordKey` and verified the inner
+  signature under `ik_pub`.
+- `darwin/arm64` and `windows/amd64` were compiled and never executed. Only
+  `linux/amd64` has been run.
+- The release workflow's own smoke test never passed on `0.1.1`: it failed on
+  the published package being private, which was corrected by hand afterwards,
+  and the run could not then be re-triggered. The verification above was done
+  manually and is the stronger of the two — a real host, a real certificate, a
+  real record — but the automated gate was red and saying otherwise would be
+  false.
+
 ## [0.1.1] — 2026-07-27
 
-**This is the final release. The project is archived** — see the README for why.
-`0.1.1` exists because `0.1.0` was tagged but never completed: its container
-image could not be pulled by anyone, and it did not contain `trigcheck`, which
-`docs/deploy-check.md` §6 requires. Use this release, not that one.
+**Superseded by `0.1.2`**, which is the final release. `0.1.1` exists because
+`0.1.0` was tagged but never completed: its container image could not be pulled
+by anyone, and it did not contain `trigcheck`, which `docs/deploy-check.md` §6
+requires. `0.1.1` fixed both, but its `docker-compose.yml` still built from
+source, so following the documentation still did the wrong thing. Use `0.1.2`.
 
 ### What is and is not verified
 
@@ -140,6 +183,7 @@ rather than a record of change from a previous version.
   vacuously. Enforcement belongs in the components that emit client data, not in
   a driver that cannot tell a certificate error from a request.
 
-[Unreleased]: https://github.com/trigstation/trigstationd/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/trigstation/trigstationd/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/trigstation/trigstationd/releases/tag/v0.1.2
 [0.1.1]: https://github.com/trigstation/trigstationd/releases/tag/v0.1.1
 [0.1.0]: https://github.com/trigstation/trigstationd/releases/tag/v0.1.0

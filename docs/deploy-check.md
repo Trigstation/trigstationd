@@ -132,7 +132,7 @@ landed since the last release, and the compose file there may name an image tag
 that does not exist yet:
 
 ```
-git clone --branch v0.1.1 https://github.com/trigstation/trigstationd
+git clone --branch v0.1.2 https://github.com/trigstation/trigstationd
 cd trigstationd
 git describe --tags        # confirm you are on the tag, not past it
 cp .env.example .env
@@ -564,7 +564,7 @@ Use `trigcheck`, which does exactly one publish and reports the status. It ships
 alongside the directory in every release, so this needs no Go toolchain:
 
 ```
-v=v0.1.1
+v=v0.1.2
 curl -fsSLO https://github.com/trigstation/trigstationd/releases/download/$v/trigcheck_${v}_linux_amd64
 curl -fsSLO https://github.com/trigstation/trigstationd/releases/download/$v/checksums.txt
 sha256sum -c checksums.txt --ignore-missing

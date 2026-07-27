@@ -23,6 +23,13 @@ Copyright (C) 2026 Simon Wright
 >
 > The specification, decision log and conformance vectors remain accurate and are
 > free to reuse under their respective licences.
+>
+> It reached a deployed, publicly-served, independently-verified v0.1: two
+> conformance vector sets, a released image pulled and run unmodified on a live
+> host, and the no-logging property of §9.2 demonstrated by experiment rather
+> than asserted — including reproducing the leak deliberately, because a check
+> that cannot fail is not a check. It was halted because the premise did not
+> hold, not because the work did not.
 
 
 Trigstation is a zero-knowledge coordination service that lets a self-hosted

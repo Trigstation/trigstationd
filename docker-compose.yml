@@ -26,12 +26,12 @@ services:
     # an unrelated process so that the failure never named memory at all.
     #
     # The tag carries no `v`: the release workflow tags images from the
-    # semantic version, so the git tag `v0.1.1` publishes the image `0.1.1`.
+    # semantic version, so the git tag `v0.1.2` publishes the image `0.1.2`.
     #
     # Pinned rather than `latest` deliberately. An operator should know which
     # directory they are running, and `latest` on a restart is an unannounced
     # upgrade of a service whose wire format other people depend on.
-    image: ghcr.io/trigstation/trigstationd:0.1.1
+    image: ghcr.io/trigstation/trigstationd:0.1.2
     restart: unless-stopped
 
     # No `ports:`. The directory is not published to the host at all — it is
