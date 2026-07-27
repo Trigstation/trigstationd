@@ -474,10 +474,10 @@ instance against itself.
 
 A publish requires an epoch-derived `LookupID`, a signed inner payload, a sealed
 ciphertext and a 20-bit proof of work, so it cannot be improvised with `curl`.
-Use `cmd/trigpub`, which does exactly one publish and reports the status:
+Use `cmd/trigcheck`, which does exactly one publish and reports the status:
 
 ```
-go run ./cmd/trigpub \
+go run ./cmd/trigcheck \
   -url https://$DOMAIN \
   -endpoint wan4:203.0.113.7:8920 \
   -o published-envelope.json
@@ -490,7 +490,7 @@ them — which is what you want against a new instance. **Keep what it prints**:
 sending it, so those are the bytes to compare against in step 4 whatever the
 directory answers.
 
-1. Publish, either with `trigpub` or by pointing a real media server at
+1. Publish, either with `trigcheck` or by pointing a real media server at
    `https://$DOMAIN`. Expect `status 204` — §5.2 makes `204` the sole success
    code, and a publish that replaces an existing record is not distinguished
    from one that creates it.
@@ -502,8 +502,38 @@ directory answers.
    ```
 
 3. **From a different network** — not the VPS, not the server's LAN; a phone on
-   mobile data is ideal — perform a lookup and confirm the envelope decrypts and
-   its inner signature verifies.
+   mobile data or any other host is ideal — read the record back and confirm it
+   decrypts and its inner signature verifies:
+
+   ```
+   go run ./cmd/trigcheck -verify -url https://$DOMAIN \
+     -s-dir <what it printed> -ik-pub <what it printed>
+   ```
+
+   Expect the endpoints you published, and these three lines:
+
+   ```
+   matched       envelope signature and lookup_id binding: OK
+                 payload decrypted under the derived RecordKey: OK
+                 inner signature under ik_pub: OK
+   ```
+
+   It also prints the bucket size, which is §5.3's anonymity set made
+   observable: the directory learned that somebody asked about that many
+   servers and no more. On a new instance the bucket is most of the table,
+   which is expected and resolves itself as the instance grows.
+
+   **Confirm this check can fail**, since a verifier that always succeeds is
+   worse than none. Repeat it with one byte changed in `-ik-pub`, and again with
+   `-s-dir` changed. The two failures are different and both should appear:
+
+   ```
+   # wrong -ik-pub: the payload decrypts, the inner signature does not verify
+   trigcheck: payload decrypted but its inner signature does not verify under -ik-pub
+
+   # wrong -s-dir: nothing in the bucket decrypts at all
+   trigcheck: no envelope in the bucket decrypted under this S_dir
+   ```
 
    **On a new directory the only prefix you may ask for is `bits=0`.** §5.3 caps
    precision at `bits_max = max(0, floor(log2(record_count / 20)))` against the
@@ -550,11 +580,11 @@ directory answers.
    structure and re-encodes will silently drop them while looking entirely
    healthy.
 
-   Build an envelope without publishing it — point `trigpub` at a dead port, so
+   Build an envelope without publishing it — point `trigcheck` at a dead port, so
    it writes the file and then fails at the `PUT` — add a member, and send that:
 
    ```
-   go run ./cmd/trigpub -url http://127.0.0.1:1 \
+   go run ./cmd/trigcheck -url http://127.0.0.1:1 \
      -endpoint wan4:203.0.113.7:8920 -o probe.json      # exits non-zero, as intended
    jq -c '. + {"x-unknown-probe":"survives"}' probe.json > probe-sent.json
    curl -s -o /dev/null -w '%{http_code}\n' -X PUT \

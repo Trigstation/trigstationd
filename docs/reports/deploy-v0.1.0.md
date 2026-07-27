@@ -426,16 +426,34 @@ those needed to run. Recorded as `I-9`. `deploy-check.md` no longer states a RAM
 requirement; the swapfile instructions remain, scoped to "if you must build on
 the host anyway", which is true only until the first tag.
 
-**Follow-up, and it is load-bearing:** `docker-compose.yml` still builds from
-context, because `ghcr.io/trigstation/trigstationd` does not exist until `v0.1.0`
-is tagged. The release workflow already publishes it multi-arch on every `v*`
-tag. A comment block at the top of the service records the exact change to make.
+**The image switch is part of tag verification, not a follow-up.**
+`docker-compose.yml` still builds from context, because
+`ghcr.io/trigstation/trigstationd` does not exist until `v0.1.0` is tagged. The
+release workflow already publishes it multi-arch on every `v*` tag, and a
+comment block on the service records the exact change to make.
+
+The sequence, in order, and each step gates the next:
+
+1. Finish this deployment building locally — serving, verified.
+2. Tag `v0.1.0`.
+3. Switch `docker-compose.yml` to `image: ghcr.io/trigstation/trigstationd:0.1.0`
+   and delete the `build:` block.
+4. Redeploy on **this droplet**, pulling rather than building.
+5. Confirm it is still serving.
+
+Only after 5 is the release verified. A published artefact nobody has run is
+worse than no release, and this host is the test — once it pulls rather than
+builds, its lack of a Go toolchain concern is the point rather than a
+limitation, and it is the only host available. **If the pull fails or the image
+misbehaves, that is tag-blocking**, not something to carry forward.
+
 The swapfile stays on this host regardless — it costs nothing and covers other
-surprises — but it is no longer a documented prerequisite.
+surprises — but it is no longer a documented prerequisite, and after step 4 it
+should no longer be load-bearing for anything.
 
 ---
 
-## cmd/trigpub
+## cmd/trigcheck (was cmd/trigcheck)
 
 A supported publishing tool, not a throwaway. It takes `S_dir`, an endpoint
 list and a directory URL, publishes once, and reports the status. No daemon, no
@@ -475,11 +493,82 @@ The last two are the sharp test. A directory that decoded envelopes into a typed
 structure and re-encoded them would drop the unknown member while looking
 entirely healthy, and §10's additive-change policy depends on it not doing so.
 
-Verification used a throwaway program against `internal/derive` and
-`internal/record`, which was deleted afterwards. **`trigpub` publishes but does
-not look up or verify**, so `deploy-check.md` §6's "confirm the envelope
-decrypts and its inner signature verifies" is still not executable with shipped
-tooling alone. See the handback.
+That verification initially used a throwaway program, which is what prompted the
+`-verify` mode below.
+
+### -verify: reading the record back
+
+Added on the ruling that a directory should be checkable on its own. The
+objection — that verification belongs to a client library — holds for production
+and not for conformance: requiring a client library means no directory can be
+verified until one exists in the operator's language, which inverts the
+dependency, since the directory is the thing with a specification and vectors.
+
+Scoped as a check, not a client. It reads `record_count` from `/v1/meta`,
+computes the §5.3 prefix width, issues the `GET`, trial-decrypts each returned
+envelope, verifies the inner signature under `-ik-pub`, and prints the endpoints
+and the bucket size. It does **not** implement the epoch fallback window, race
+endpoints, connect to anything it finds, or persist state.
+
+The tool was renamed `trigpub` → `trigcheck`, before a tag makes the name a
+compatibility concern.
+
+**The bucket size is printed** because it makes §5.3's anonymity-set claim
+observable rather than theoretical. Against a 131-record instance:
+
+```
+record_count  130
+bits          1   (k=50, §5.3)
+prefix        "8"
+returned      70 envelopes, 35115 bytes — the anonymity set for this lookup
+              note: that is most of the directory. Below 2 x k a bucket is
+              much of the table, which is expected on a small instance ...
+```
+
+70 envelopes returned, exactly one decrypted — which is the real test of §5.3's
+"authentication failure is the filter". The response size also corroborates the
+specification's own estimate: 35 KB for 70 envelopes against §5.3's "roughly 98
+envelopes and about 40 KB".
+
+**Proved it can fail.** A verifier that always succeeds is worse than none:
+
+| Input | Result |
+|---|---|
+| Correct `-s-dir`, correct `-ik-pub` | matched, exit 0 |
+| Wrong `-ik-pub` | `payload decrypted but its inner signature does not verify under -ik-pub`, exit 1 |
+| Wrong `-s-dir` | `no envelope in the bucket decrypted under this S_dir`, exit 1 |
+
+Two distinct failures, which matters: they distinguish "you have the wrong
+identity key" from "you have the wrong directory secret", and an operator
+debugging a first publish needs to know which.
+
+### Tests, and breaking them on purpose
+
+`prefixBits` and `prefixHex` encode §5.3 arithmetic, which is where an
+implementation diverges silently, so both are tested at the boundaries — the
+`round`-versus-`floor` inputs where a wrong implementation differs and nowhere
+else, plus §5.3's worked example of `bits = 10` at 100,000 records. A property
+test asserts the §5.1 promise directly: across 20,000 record counts, the width a
+client computes at `k = 50` never exceeds the directory's cap at `k_min = 20`.
+
+Both were broken deliberately and confirmed to fail:
+
+```
+BREAK 1 — floor -> exclusive bound:
+  prefixBits(100, 50) = 0, want 1        (and at 200, 400)
+BREAK 2 — remove the trailing-bit mask:
+  prefixHex(bits=11) = "a3f", want "a3e"
+  bits=1: "f" has 3 significant trailing bits set, want zero
+```
+
+Restored, and passing.
+
+### One cosmetic bug found by running it
+
+An IPv6 endpoint printed as `2001:db8::1:8920` — unreadable, and itself a valid
+IPv6 address, so the operator cannot see where the address ends and the port
+begins in the one output they are reading to confirm the record. Now bracketed:
+`[2001:db8::1]:8920`.
 
 ---
 
@@ -508,14 +597,14 @@ regenerated and none needed to be. Both `testdata/vectors.json` and
 | `internal/store` | No change needed. | No change needed. |
 | `internal/vectors` | No change needed. | No change needed. |
 | `cmd/gen-vectors`, `cmd/gen-api-vectors` | No change needed; build-time tools. | No change needed. |
-| `cmd/trigpub` | **New.** It is a client, not a directory, and prints only its own key material to its own terminal. Documented in the package comment so a future reader does not mistake it for a violation. | Consistent: it is a client and is not deployed. |
+| `cmd/trigcheck` | **New.** It is a client of the directory, not a directory, and prints only its own key material and its own decrypted payload to its own terminal. Documented in the package comment so a future reader does not mistake it for a violation. | Consistent: it is a client and is not deployed. |
 | `docker-compose.yml` | **Changed.** Bounded `json-file` on both services. | **Follow-up recorded**, not yet actionable — no published image until `v0.1.0`. |
 | `Caddyfile` | **Changed.** ACME account address added. `exclude` untouched. | No change needed. |
 
 A table reading "no change needed" in most cells is the evidence the audit
 happened. The two cells that are not are `internal/api`, where the new wording
 required a judgement that the existing design had already anticipated, and
-`cmd/trigpub`, which is new and is a client rather than a deployment.
+`cmd/trigcheck`, which is new and is a client rather than a deployment.
 
 Gates re-run after all changes: `gofmt` clean, `go vet` clean, no logging
 imports anywhere in the tree, licence headers present, full test suite passing.
