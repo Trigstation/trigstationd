@@ -14,28 +14,24 @@
 services:
   trigstationd:
     # ------------------------------------------------------------------
-    # FOLLOW-UP, at the first tagged release: replace this build with
-    #
-    #     image: ghcr.io/trigstation/trigstationd:<version>
-    #
-    # and delete the `build:` block.
+    # A published image, pinned. Do not replace this with a build.
     # ------------------------------------------------------------------
     #
     # §9 says a directory is deployed by pulling a published image or a
     # released binary, and that the memory and toolchain needed to compile are
-    # unrelated to those needed to run. Building from context here contradicts
-    # that: it makes the Go toolchain's peak memory into the deployment's
-    # requirement, and an instance sized correctly by §9.1 then fails before
-    # serving a request — as one did, with the OOM killer taking an unrelated
-    # process so that the failure never named memory at all.
+    # unrelated to those needed to run. Building from context here would
+    # contradict that: it makes the Go toolchain's peak memory into the
+    # deployment's requirement, and an instance sized correctly by §9.1 then
+    # fails before serving a request — as one did, with the OOM killer taking
+    # an unrelated process so that the failure never named memory at all.
     #
-    # The release workflow already publishes ghcr.io/trigstation/trigstationd
-    # multi-arch on every `v*` tag. This still builds only because no tag
-    # exists yet, and it is the one thing to change when one does.
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: trigstationd:local
+    # The tag carries no `v`: the release workflow tags images from the
+    # semantic version, so the git tag `v0.1.1` publishes the image `0.1.1`.
+    #
+    # Pinned rather than `latest` deliberately. An operator should know which
+    # directory they are running, and `latest` on a restart is an unannounced
+    # upgrade of a service whose wire format other people depend on.
+    image: ghcr.io/trigstation/trigstationd:0.1.1
     restart: unless-stopped
 
     # No `ports:`. The directory is not published to the host at all — it is
