@@ -15,10 +15,13 @@ a check greps captured output, confirm the output is non-empty first, and where
 a check guards something that matters, break the thing deliberately once and
 confirm the check notices. Each such point is marked below.
 
-Sections 0, 1, 4b, 4c and 5 have been executed against a real public instance.
-Sections 2, 3, 4a and 6 depend on a certificate and are corrected from the
-implementation and the specification rather than from a run — treat those as
-carefully reasoned rather than as observed, and correct them as you go.
+**Every section here has been executed end to end against a real public
+instance**, including certificate issuance, the no-logging verification at all
+three layers, a first publish read back from a different network, and a reboot.
+Where the document was wrong it has been corrected from what happened rather
+than from what was expected. It is the only document in this project written
+from experience rather than design, so if something here does not match what you
+observe, the document is the more likely to be wrong — please say so.
 
 ---
 
@@ -26,47 +29,36 @@ carefully reasoned rather than as observed, and correct them as you go.
 
 You need:
 
-- A VPS with a public IPv4 address. §9.1 puts the *running* load at a small
-  instance — NZ$10–25/month is the right order — but note that figure is about
-  serving traffic, not about building. See the memory note below.
-  There is **no memory requirement beyond what §9.1 implies**, and if you find
-  yourself needing one, you are compiling on the deployment host — see the note
-  immediately below. A directory serves comfortably in well under the smallest
-  instance any provider sells.
+- A VPS with a public IPv4 address. §9.1 puts the load at a small instance —
+  NZ$10–25/month is the right order. There is **no memory requirement beyond
+  that**: a directory serves comfortably in well under the smallest instance any
+  provider sells, and the first public deployment runs on 512 MB.
 
-- **Deploy a published image; do not build on the host.** §9 is explicit that a
-  directory is deployed by pulling a published image or a released binary, and
-  that the memory and toolchain needed to compile are unrelated to those needed
-  to run. A compose file that builds from context makes the Go toolchain's peak
-  into the deployment's requirement, and a correctly sized instance then fails
-  before it has served a single request.
+  If you find yourself needing swap, you are compiling on the deployment host,
+  which is not part of the deployment path. Should you do it anyway, note that
+  it fails *indirectly* and expensively: the kernel's OOM killer takes whichever
+  process is largest at that moment, so what you see is an unrelated tool dying
+  — on the first deployment it was `dracut`, which left a broken initramfs and
+  mentioned memory nowhere. `dmesg -T | grep -i 'out of memory'` is the check
+  that identifies it, and two gigabytes of swap is the remedy.
 
-  It fails *indirectly*, which is what makes it expensive: the kernel's OOM
-  killer takes whichever process is largest at that moment, so what you see is
-  an unrelated package or tool dying — on the first deployment it was `dracut`,
-  leaving a broken initramfs and no mention of memory anywhere. If anything on a
-  small instance behaves inexplicably, check this before believing any other
-  diagnosis:
+- **Deploy the published image.** §9 is explicit that a directory is deployed by
+  pulling a published image or a released binary, and that the memory and
+  toolchain needed to compile are unrelated to those needed to run. Nothing
+  below asks you to build anything.
 
-  ```
-  dmesg -T | grep -i 'out of memory'
-  ```
+- **Ports 80, 443/tcp and 443/udp reachable from the internet.** All three, and
+  each for a different reason:
 
-  If you must build on the host anyway — before the first tagged release there
-  is no published image — give it swap first. Two gigabytes is enough:
-
-  ```
-  fallocate -l 2G /swapfile && chmod 0600 /swapfile
-  mkswap /swapfile && swapon /swapfile
-  echo '/swapfile none swap sw 0 0' >> /etc/fstab   # or it is gone after a reboot
-  ```
-
-- **Ports 80, 443/tcp and 443/udp reachable from the internet.** ACME's HTTP-01
-  challenge needs port 80, and it is the thing most often blocked by a
-  provider's default firewall. Check before you start, not after Caddy has
-  failed five times and been rate limited. 443/udp is HTTP/3, which
-  `docker-compose.yml` publishes; omitting it costs you HTTP/3 silently rather
-  than loudly, because clients fall back to TCP and nothing appears wrong.
+  - **443/tcp** carries the directory, and also the ACME challenge — Caddy
+    prefers TLS-ALPN-01 and solves it here (see §2).
+  - **80/tcp** serves the HTTP-to-HTTPS redirect, and is the HTTP-01 fallback if
+    443 is ever unreachable. It is the port most often blocked by a provider's
+    default firewall, so check it before you start rather than after Caddy has
+    failed five times and been rate limited.
+  - **443/udp** is HTTP/3, which `docker-compose.yml` publishes. Omitting it
+    costs you HTTP/3 silently rather than loudly, because clients fall back to
+    TCP and nothing appears wrong.
 
   A refused connection and a timed-out one mean different things here. `nc -vz
   $HOST 80` answering *refused* proves packets reach the host and only that
@@ -132,11 +124,19 @@ You need:
 
 ## 1. Configure
 
+You need the repository for two files — `docker-compose.yml` and `Caddyfile`.
+The directory itself comes from the published image, not from this checkout.
+
+**Check out a release tag, not the default branch.** `main` carries whatever has
+landed since the last release, and the compose file there may name an image tag
+that does not exist yet:
+
 ```
-git clone https://github.com/trigstation/trigstationd
+git clone --branch v0.1.0 https://github.com/trigstation/trigstationd
 cd trigstationd
+git describe --tags        # confirm you are on the tag, not past it
 cp .env.example .env
-$EDITOR .env          # set TRIGSTATION_DOMAIN=$DOMAIN
+$EDITOR .env               # set TRIGSTATION_DOMAIN=$DOMAIN
 ```
 
 **If you have modified the source**, set `TRIGSTATION_SOURCE_URL` in `.env` to
@@ -560,14 +560,25 @@ instance against itself.
 
 A publish requires an epoch-derived `LookupID`, a signed inner payload, a sealed
 ciphertext and a 20-bit proof of work, so it cannot be improvised with `curl`.
-Use `cmd/trigcheck`, which does exactly one publish and reports the status:
+Use `trigcheck`, which does exactly one publish and reports the status. It ships
+alongside the directory in every release, so this needs no Go toolchain:
 
 ```
-go run ./cmd/trigcheck \
+v=v0.1.0
+curl -fsSLO https://github.com/trigstation/trigstationd/releases/download/$v/trigcheck_${v}_linux_amd64
+curl -fsSLO https://github.com/trigstation/trigstationd/releases/download/$v/checksums.txt
+sha256sum -c checksums.txt --ignore-missing
+chmod +x trigcheck_${v}_linux_amd64
+
+./trigcheck_${v}_linux_amd64 \
   -url https://$DOMAIN \
   -endpoint wan4:203.0.113.7:8920 \
   -o published-envelope.json
 ```
+
+`trigcheck` is a client, so run it from wherever you like — it is only the
+lookup in step 3 that has to come from a different network. From a source
+checkout, `go run ./cmd/trigcheck` is equivalent.
 
 With no `-s-dir` or `-ik` it generates both, prints them, and publishes under
 them — which is what you want against a new instance. **Keep what it prints**:
@@ -592,7 +603,7 @@ directory answers.
    decrypts and its inner signature verifies:
 
    ```
-   go run ./cmd/trigcheck -verify -url https://$DOMAIN \
+   ./trigcheck_${v}_linux_amd64 -verify -url https://$DOMAIN \
      -s-dir <what it printed> -ik-pub <what it printed>
    ```
 
@@ -670,7 +681,7 @@ directory answers.
    it writes the file and then fails at the `PUT` — add a member, and send that:
 
    ```
-   go run ./cmd/trigcheck -url http://127.0.0.1:1 \
+   ./trigcheck_${v}_linux_amd64 -url http://127.0.0.1:1 \
      -endpoint wan4:203.0.113.7:8920 -o probe.json      # exits non-zero, as intended
    jq -c '. + {"x-unknown-probe":"survives"}' probe.json > probe-sent.json
    curl -s -o /dev/null -w '%{http_code}\n' -X PUT \

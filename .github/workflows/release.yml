@@ -47,17 +47,25 @@ jobs:
           set -eu
           version="${GITHUB_REF_NAME}"
           mkdir -p dist
-          for target in linux/amd64 linux/arm64 darwin/arm64 windows/amd64; do
-            goos="${target%/*}"
-            goarch="${target#*/}"
-            name="trigstationd_${version}_${goos}_${goarch}"
-            out="dist/${name}"
-            if [ "$goos" = "windows" ]; then out="${out}.exe"; fi
-            echo "building ${target}"
-            GOOS="$goos" GOARCH="$goarch" go build \
-              -trimpath \
-              -ldflags "-s -w" \
-              -o "$out" .
+          # trigcheck ships alongside the directory because docs/deploy-check.md
+          # §6 is written around it, and an operator deploying the published
+          # image has no Go toolchain to build it with. A verification step that
+          # requires a compiler is one most operators will skip.
+          for cmd in trigstationd:. trigcheck:./cmd/trigcheck; do
+            binary="${cmd%%:*}"
+            pkg="${cmd#*:}"
+            for target in linux/amd64 linux/arm64 darwin/arm64 windows/amd64; do
+              goos="${target%/*}"
+              goarch="${target#*/}"
+              name="${binary}_${version}_${goos}_${goarch}"
+              out="dist/${name}"
+              if [ "$goos" = "windows" ]; then out="${out}.exe"; fi
+              echo "building ${binary} ${target}"
+              GOOS="$goos" GOARCH="$goarch" go build \
+                -trimpath \
+                -ldflags "-s -w" \
+                -o "$out" "$pkg"
+            done
           done
           ls -l dist
 
@@ -146,10 +154,52 @@ jobs:
     needs: image
     runs-on: ubuntu-latest
     steps:
+      # A package published to GHCR is PRIVATE on first publish, and nothing in
+      # the push reports that. The failure then surfaces one step later as a
+      # bare "unauthorized" from `docker pull`, which reads like a credentials
+      # problem in the workflow and is not — it is a repository setting.
+      #
+      # This is checked separately, and first, so that the message names the
+      # fix. §9 of DIRECTORY-SPEC.md says a directory is deployed by pulling a
+      # published image; an image only the publisher can pull does not satisfy
+      # that, and v0.1.0 shipped in exactly that state until it was caught here.
+      #
+      # The check is the registry's own anonymous-token endpoint: GHCR issues a
+      # pull token without credentials only for a public package. No new
+      # dependency, no new permission, and it tests what a stranger experiences
+      # rather than what this workflow can reach.
+      - name: the published package is publicly pullable
+        run: |
+          set -eu
+          repo="trigstation/trigstationd"
+          token=$(curl -sS "https://ghcr.io/token?service=ghcr.io&scope=repository:${repo}:pull" \
+                    | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+          if [ -n "$token" ]; then
+            echo "${repo} is publicly pullable"
+            exit 0
+          fi
+          cat <<'MSG'
+          The published container package is PRIVATE, so nobody can pull it.
+
+          GHCR makes a package private on first publish. The image was built and
+          pushed correctly; it is the package visibility that is wrong.
+
+          Fix, once, and then re-run this job:
+
+            https://github.com/orgs/Trigstation/packages/container/trigstationd/settings
+              -> Danger Zone -> Change visibility -> Public
+
+          Do not resolve this by authenticating the pull below. That step is
+          anonymous deliberately: it verifies that a stranger can deploy the
+          release, and logging in would make it pass while the property it
+          exists to check stayed broken.
+          MSG
+          exit 1
+
       # A release that builds but does not run is worse than no release, and
       # "the workflow exited zero" is not evidence that it runs. This pulls the
       # image that was just published — not a local build — and asks it a
-      # question.
+      # question. No `docker login`: see above.
       - name: pull and run
         run: |
           set -eu
