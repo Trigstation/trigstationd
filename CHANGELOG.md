@@ -56,14 +56,20 @@ internet, on a live host, with no credentials of any kind:
   against that instance**, following §6 of `deploy-check.md` as written. It
   decrypted the record under the derived `RecordKey` and verified the inner
   signature under `ik_pub`.
+- **The release workflow's own smoke test passed**, for the first and only time
+  in the project's history. It asserted the published package was anonymously
+  pullable, pulled it, ran it, and confirmed `/v1/meta`, a populated
+  `source_url`, four operations and no more, and exactly one line of output.
+  On `0.1.1` that job failed — the package was private, which was corrected by
+  hand afterwards, and the run could not then be re-triggered.
 - `darwin/arm64` and `windows/amd64` were compiled and never executed. Only
   `linux/amd64` has been run.
-- The release workflow's own smoke test never passed on `0.1.1`: it failed on
-  the published package being private, which was corrected by hand afterwards,
-  and the run could not then be re-triggered. The verification above was done
-  manually and is the stronger of the two — a real host, a real certificate, a
-  real record — but the automated gate was red and saying otherwise would be
-  false.
+
+The image digest verified on the live host is
+`sha256:f16745c70c180d0d123b9ad498ba04597c8d471819cbc8ebb08de1dc853635f7`. The
+record published before any of these swaps returned byte-for-byte after both of
+them, which is §5.2's verbatim-storage requirement holding across two container
+replacements.
 
 ## [0.1.1] — 2026-07-27
 
