@@ -23,7 +23,57 @@ Two conventions worth keeping:
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-07-27
+
+**This is the final release. The project is archived** — see the README for why.
+`0.1.1` exists because `0.1.0` was tagged but never completed: its container
+image could not be pulled by anyone, and it did not contain `trigcheck`, which
+`docs/deploy-check.md` §6 requires. Use this release, not that one.
+
+### What is and is not verified
+
+Stated plainly, because a release that overstates its own testing is worse than
+one that says less.
+
+- **The source is tested.** `go vet` and the full suite pass, including a test
+  that runs the real binary and asserts it emits nothing beyond its startup
+  line, and both sets of conformance vectors reproduce.
+- **linux/amd64 is known to run.** A directory built from this source served
+  public traffic under a production Let's Encrypt certificate, and a
+  `trigcheck` built the same way published a record to it and read it back.
+  That was an equivalent local build rather than the uploaded artefact.
+- **darwin/arm64 and windows/amd64 were compiled and never executed**, on their
+  target platforms or anywhere else.
+- **The container image was published but never pulled and run on a clean
+  host.** The release workflow's smoke test exists to do exactly that and did
+  not pass before the project was archived. The image is built from the same
+  Dockerfile as the deployment that served traffic, but nobody has verified the
+  published artefact itself.
+
+### Added
+
+- `trigcheck` is now cross-compiled and published alongside `trigstationd`.
+  `docs/deploy-check.md` §6 is written around it, and an operator deploying the
+  published image has no Go toolchain to build it with.
+- The release workflow asserts that the published package is publicly pullable,
+  before attempting the pull, so the failure names the fix rather than arriving
+  as a bare `unauthorized`. The check uses the registry's anonymous-token
+  endpoint: a token is issued without credentials only for a public package.
+
+### Changed
+
+- `docs/deploy-check.md` has now been executed end to end against a real public
+  instance and corrected throughout from what happened rather than what was
+  expected. It no longer states a memory prerequisite, which was only ever
+  needed for compiling on the deployment host; it checks out a release tag
+  rather than the default branch; and it explains the three required ports
+  separately, since TLS-ALPN-01 means port 80 does not carry the challenge.
+
 ## [0.1.0] — 2026-07-27
+
+**Tagged but never released.** The published container image was private and
+could not be pulled, and the release did not include `trigcheck`. Superseded by
+`0.1.1`; the entry below describes the work, which is unchanged.
 
 ### Added
 
@@ -79,5 +129,6 @@ rather than a record of change from a previous version.
   vacuously. Enforcement belongs in the components that emit client data, not in
   a driver that cannot tell a certificate error from a request.
 
-[Unreleased]: https://github.com/trigstation/trigstationd/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/trigstation/trigstationd/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/trigstation/trigstationd/releases/tag/v0.1.1
 [0.1.0]: https://github.com/trigstation/trigstationd/releases/tag/v0.1.0

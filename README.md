@@ -5,6 +5,26 @@ Copyright (C) 2026 Simon Wright
 
 # trigstationd
 
+> **This project is archived.** It is a complete, tested implementation of the
+> Trigstation directory protocol — it built, deployed, served under a production
+> certificate, and passed its own conformance vectors. It stopped for reasons of
+> premise rather than execution.
+>
+> The directory is a locator, not a transport. It coordinates connections that
+> the participants' networks already permit, and relay was an explicit non-goal.
+> So the case where the alternatives fail hardest — CGNAT — is the case this does
+> not solve either. Cloudflare Tunnel and Tailscale cover the intended use case
+> at no cost, with clients that already exist.
+>
+> The design was also scaled for a public service at 100,000 servers. Every hard
+> constraint here — zero-knowledge storage, blinded lookups, replaceable
+> instances, a wire format frozen for a decade — follows from that. At the scale
+> actually needed, a host you control and a domain you own is the whole answer.
+>
+> The specification, decision log and conformance vectors remain accurate and are
+> free to reuse under their respective licences.
+
+
 Trigstation is a zero-knowledge coordination service that lets a self-hosted
 media server be located by its paired clients over the internet. It stores
 encrypted address records and brokers short-lived rendezvous channels so that
