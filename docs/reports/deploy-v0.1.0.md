@@ -989,3 +989,38 @@ is the argument for leaving it exactly as it is.
 
 The instance continues to serve from the locally built image, which is verified
 and identical in content to the published one.
+
+---
+
+# Closing note
+
+The project was halted after this deployment, for reasons of premise rather
+than execution. See either README.
+
+**The instance described above was real and worked.** It served
+`dir.trigstation.com` under a production Let's Encrypt certificate, held a
+published record that read back byte-for-byte from a different network, rate
+limited per real client address through Caddy, returned from a reboot
+unattended, and recorded nothing client-derived at any of the three layers this
+report tests. The droplet has since been cancelled, so none of it can be
+re-checked; the commands and outputs above are the record.
+
+**What was left undone, and why.** The tag sequence ended one step short. The
+published container image was never pulled and run on a clean host, because the
+GHCR package remained private and the release workflow's smoke test — which
+exists to catch exactly that — never passed. `v0.1.1` therefore ships binaries
+that are verified to the extent the changelog describes and an image that is
+not. That is stated in the release notes rather than glossed.
+
+The remaining step would have been to point `docker-compose.yml` at the
+published image and redeploy. It was deliberately not done: verifying a
+deployment onto a host about to be destroyed is ceremony, not evidence.
+
+**What this report is for now.** It is the only account of the system running
+outside CI, and `docs/deploy-check.md` is the only document in the project
+written from experience rather than design. Both are accurate as of the
+deployment. Anyone reusing the specification or the conformance vectors — which
+remain correct and are freely licensed — will find the §9.2 verification here
+the least obvious part to reproduce, and the part most worth reading first: the
+property it checks fails silently, and the check itself passes silently when it
+is broken.
