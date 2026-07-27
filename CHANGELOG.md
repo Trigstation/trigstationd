@@ -38,17 +38,28 @@ one that says less.
 - **The source is tested.** `go vet` and the full suite pass, including a test
   that runs the real binary and asserts it emits nothing beyond its startup
   line, and both sets of conformance vectors reproduce.
-- **linux/amd64 is known to run.** A directory built from this source served
-  public traffic under a production Let's Encrypt certificate, and a
-  `trigcheck` built the same way published a record to it and read it back.
-  That was an equivalent local build rather than the uploaded artefact.
+- **The container image was pulled and run on a live host, and serves.**
+  `ghcr.io/trigstation/trigstationd:0.1.1`, digest
+  `sha256:de8368a0b0344c87e11ba55e044923f809782a0995b69ced7eb6d2fcac5e49a7`,
+  was pulled anonymously onto a host that had never held it and with no
+  registry credentials, and came up **on the first attempt with no
+  intervention**. It then served `dir.trigstation.com` over a production Let's
+  Encrypt certificate: `/v1/meta` answering `200` with a verified chain, the
+  `308` redirect intact, HTTP/3 advertised, and a record published before the
+  swap returned byte-for-byte afterwards.
+- **The released `trigcheck` binary was downloaded, checksum-verified and
+  run against that instance**, following `docs/deploy-check.md` §6 as written.
+  It decrypted the record under the derived `RecordKey` and verified the inner
+  signature under `ik_pub`. Both released artefacts were therefore confirmed
+  together, each against the other, over the public internet.
 - **darwin/arm64 and windows/amd64 were compiled and never executed**, on their
-  target platforms or anywhere else.
-- **The container image was published but never pulled and run on a clean
-  host.** The release workflow's smoke test exists to do exactly that and did
-  not pass before the project was archived. The image is built from the same
-  Dockerfile as the deployment that served traffic, but nobody has verified the
-  published artefact itself.
+  target platforms or anywhere else. Only `linux/amd64` has been run.
+- **The release workflow's own smoke test never passed.** It failed on the
+  published package being private, which was corrected afterwards by hand; the
+  run could not then be re-triggered. The verification above was performed
+  manually instead and is the stronger of the two — it used a real host, a real
+  certificate and a real record rather than a scratch container — but the
+  automated gate is red and saying otherwise would be false.
 
 ### Added
 
